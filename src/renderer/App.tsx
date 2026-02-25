@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState, useEffect } from 'react'
 import { HashRouter, Routes, Route } from 'react-router-dom'
 import { AppLayout } from '@/components/layout/AppLayout'
 import Dashboard from '@/pages/Dashboard'
@@ -10,8 +10,24 @@ import SendQueue from '@/pages/SendQueue'
 import Inbox from '@/pages/Inbox'
 import Settings from '@/pages/Settings'
 import Portfolio from '@/pages/Portfolio'
+import Onboarding from '@/pages/Onboarding'
 
 export default function App() {
+  const [showOnboarding, setShowOnboarding] = useState<boolean | null>(null)
+
+  useEffect(() => {
+    window.electronAPI.settings.get('onboarding_complete').then(val => {
+      setShowOnboarding(!val)
+    })
+  }, [])
+
+  // Still checking
+  if (showOnboarding === null) return null
+
+  if (showOnboarding) {
+    return <Onboarding onComplete={() => setShowOnboarding(false)} />
+  }
+
   return (
     <HashRouter>
       <Routes>
