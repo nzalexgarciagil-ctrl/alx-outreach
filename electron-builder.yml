@@ -1,0 +1,30 @@
+appId: com.alx.outreach
+productName: ALX Outreach
+directories:
+  buildResources: resources
+  output: dist
+asar: true
+asarUnpack:
+  - "node_modules/better-sqlite3/**"
+linux:
+  target:
+    - AppImage
+  category: Office
+  icon: resources/icon.png
+mac:
+  target:
+    - dmg
+  icon: resources/icon.png
+  category: public.app-category.business
+  hardenedRuntime: false
+  gatekeeperAssess: false
+dmg:
+  title: ALX Outreach
+  sign: false
+win:
+  target:
+    - nsis
+  icon: resources/icon.ico
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true

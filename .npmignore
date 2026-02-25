@@ -1,0 +1,7 @@
+src/
+.env
+tsconfig*.json
+components.json
+electron.vite.config.ts
+electron-builder.yml
+resources/
