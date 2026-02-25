@@ -21,7 +21,7 @@
     "email": "alx.medianz@gmail.com"
   },
   "homepage": "https://instagram.com/alx.edits",
-  "license": "MIT",
+  "license": "UNLICENSED",
   "devDependencies": {
     "@tailwindcss/vite": "^4.2.1",
     "@types/better-sqlite3": "^7.6.13",
