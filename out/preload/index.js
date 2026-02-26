@@ -50,7 +50,8 @@ const api = {
     delete: (id) => electron.ipcRenderer.invoke("campaigns:delete", id),
     addLeads: (campaignId, leadIds) => electron.ipcRenderer.invoke("campaigns:addLeads", campaignId, leadIds),
     getLeadIds: (campaignId) => electron.ipcRenderer.invoke("campaigns:getLeadIds", campaignId),
-    generateDrafts: (campaignId) => electron.ipcRenderer.invoke("campaigns:generateDrafts", campaignId)
+    generateDrafts: (campaignId, extraContext) => electron.ipcRenderer.invoke("campaigns:generateDrafts", campaignId, extraContext),
+    preflight: (campaignId) => electron.ipcRenderer.invoke("campaigns:preflight", campaignId)
   },
   // Emails
   emails: {
@@ -60,6 +61,7 @@ const api = {
     delete: (id) => electron.ipcRenderer.invoke("emails:delete", id),
     approve: (id) => electron.ipcRenderer.invoke("emails:approve", id),
     reject: (id) => electron.ipcRenderer.invoke("emails:reject", id),
+    regenerate: (id, feedback) => electron.ipcRenderer.invoke("emails:regenerate", id, feedback),
     approveBatch: (ids) => electron.ipcRenderer.invoke("emails:approveBatch", ids),
     queueApproved: (campaignId) => electron.ipcRenderer.invoke("emails:queueApproved", campaignId),
     getStats: () => electron.ipcRenderer.invoke("emails:getStats"),

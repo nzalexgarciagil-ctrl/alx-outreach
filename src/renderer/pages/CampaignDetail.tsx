@@ -39,6 +39,8 @@ export default function CampaignDetail() {
   const [generating, setGenerating] = useState(false)
   const [genProgress, setGenProgress] = useState({ generated: 0, total: 0 })
   const [genErrors, setGenErrors] = useState<string[]>([])
+  const [genPhase, setGenPhase] = useState<'briefing' | 'generating' | null>(null)
+  const [genWorkers, setGenWorkers] = useState(0)
 
   // Preflight modal
   const [preflightChecking, setPreflightChecking] = useState(false)
@@ -61,8 +63,12 @@ export default function CampaignDetail() {
 
   useEffect(() => {
     const unsub = window.electronAPI.on('campaigns:draft-progress', (data: unknown) => {
-      const { generated, total } = data as { generated: number; total: number }
+      const { generated, total, workers, phase } = data as {
+        generated: number; total: number; workers: number; phase: 'briefing' | 'generating'
+      }
       setGenProgress({ generated, total })
+      setGenPhase(phase)
+      setGenWorkers(workers)
     })
     return unsub
   }, [])
@@ -101,6 +107,8 @@ export default function CampaignDetail() {
     setGenerating(true)
     setGenProgress({ generated: 0, total: 0 })
     setGenErrors([])
+    setGenPhase('briefing')
+    setGenWorkers(0)
     try {
       const result = await window.electronAPI.campaigns.generateDrafts(id!, extraContext) as {
         generated: number
@@ -114,6 +122,8 @@ export default function CampaignDetail() {
       setGenErrors([`Generation failed: ${(err as Error).message}`])
     } finally {
       setGenerating(false)
+      setGenPhase(null)
+      setGenWorkers(0)
     }
   }
 
@@ -278,6 +288,8 @@ export default function CampaignDetail() {
           )}
           {preflightChecking
             ? 'Checking template...'
+            : generating && genPhase === 'briefing'
+            ? 'Creating brief...'
             : generating
             ? `Generating (${genProgress.generated}/${genProgress.total})`
             : 'Generate AI Drafts'}
@@ -294,8 +306,23 @@ export default function CampaignDetail() {
         )}
       </div>
 
-      {generating && genProgress.total > 0 && (
-        <Progress value={genProgress.generated} max={genProgress.total} />
+      {generating && (
+        <div className="space-y-1.5">
+          {genPhase === 'briefing' ? (
+            <p className="text-xs text-zinc-400 flex items-center gap-1.5">
+              <Loader2 className="w-3 h-3 animate-spin" />
+              Creating campaign brief...
+            </p>
+          ) : genProgress.total > 0 ? (
+            <>
+              <Progress value={genProgress.generated} max={genProgress.total} />
+              <p className="text-xs text-zinc-500">
+                {genProgress.generated}/{genProgress.total} complete
+                {genWorkers > 0 && ` · ${genWorkers} workers`}
+              </p>
+            </>
+          ) : null}
+        </div>
       )}
 
       {genErrors.length > 0 && (

@@ -911,7 +911,7 @@ function logUsage(type, model, inputTokens, outputTokens) {
   } catch {
   }
 }
-async function generateDraft(templateSubject, templateBody, lead, portfolioExamples) {
+async function generateDraft(templateSubject, templateBody, lead, portfolioExamples, extraContext) {
   const client = getClient$1();
   const portfolioSection = portfolioExamples && portfolioExamples.length > 0 ? `
 AVAILABLE PORTFOLIO EXAMPLES (pick the 3-4 most relevant for this lead's industry):
@@ -921,13 +921,17 @@ When including examples in the email, replace the template's existing example li
 - [url1]  |  [url2]
 - [url3]  |  [url4]
 ` : "";
+  const extraContextSection = extraContext ? `
+ADDITIONAL CONTEXT FROM USER:
+${extraContext}
+` : "";
   const prompt = `You are an email personalization assistant for a videography agency called ALX.
 
 Given this email template and lead information, generate a personalized email.
 
 TEMPLATE SUBJECT: ${templateSubject}
 TEMPLATE BODY: ${templateBody}
-${portfolioSection}
+${portfolioSection}${extraContextSection}
 LEAD INFO:
 - First Name: ${lead.first_name}
 - Last Name: ${lead.last_name || "N/A"}
@@ -1046,6 +1050,128 @@ Return your response in this exact JSON format:
     };
   }
 }
+async function regenerateDraft(templateSubject, templateBody, lead, previousDraft, feedback, portfolioExamples) {
+  const client = getClient$1();
+  const portfolioSection = portfolioExamples && portfolioExamples.length > 0 ? `
+AVAILABLE PORTFOLIO EXAMPLES (pick the 3-4 most relevant for this lead's industry):
+${portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ""}`).join("\n")}
+` : "";
+  const prompt = `You are an email personalization assistant for a videography agency called ALX.
+
+A draft email was generated and the user has requested specific changes. Rewrite the email incorporating their feedback.
+
+ORIGINAL TEMPLATE SUBJECT: ${templateSubject}
+ORIGINAL TEMPLATE BODY: ${templateBody}
+${portfolioSection}
+LEAD INFO:
+- First Name: ${lead.first_name}
+- Last Name: ${lead.last_name || "N/A"}
+- Company: ${lead.company || "N/A"}
+- Website: ${lead.website || "N/A"}
+- Niche: ${lead.niche || "N/A"}
+
+PREVIOUS DRAFT SUBJECT: ${previousDraft.subject}
+PREVIOUS DRAFT BODY: ${previousDraft.body}
+
+USER FEEDBACK: ${feedback}
+
+INSTRUCTIONS:
+1. Rewrite the email incorporating the user's feedback exactly
+2. Keep all personalisation from the previous draft unless the feedback says otherwise
+3. Do NOT add a signature block
+4. Preserve the full template length unless told to shorten it
+
+HUMANISATION RULES:
+- Write like a real person, not a marketing bot
+- Use contractions naturally (I'm, I've, you've, it's)
+- Vary sentence length
+- BANNED: "landscape", "pivotal", "underscore", "leverage", "utilize", "delve", "comprehensive", "robust", "innovative", "transformative", "seamlessly", "tailored", "streamline", "cutting-edge"
+- No em dashes (—), no sycophantic openers, no excessive hedging
+- Specific and direct
+
+Return your response in this exact JSON format:
+{
+  "subject": "the updated subject line",
+  "body": "the updated email body (plain text, use \\n for line breaks)",
+  "personalization_notes": "brief note about what was changed based on feedback"
+}`;
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName });
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)));
+    return res.response;
+  });
+  const text = response.text();
+  logUsage("draft_regeneration", modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
+  logger.info(`Draft regenerated using ${modelUsed}`);
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) {
+      const truncated = text.substring(0, 300).replace(/\n/g, " ");
+      throw new Error(`Gemini refused: ${truncated}`);
+    }
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      subject: parsed.subject,
+      body: parsed.body,
+      personalizationNotes: parsed.personalization_notes || ""
+    };
+  } catch (err) {
+    logger.error("Failed to parse Gemini regenerate response:", text);
+    throw err instanceof Error && err.message.startsWith("Gemini refused") ? err : new Error(`Failed to parse AI response: ${err.message}`);
+  }
+}
+async function preflightCheck(templateSubject, templateBody, niche, sampleLeads) {
+  const client = getClient$1();
+  const leadSample = sampleLeads.slice(0, 4).map((l, i) => `${i + 1}. ${l.first_name} ${l.last_name || ""} | Company: ${l.company || "none"} | Website: ${l.website || "none"}`).join("\n");
+  const prompt = `You are reviewing an email template before AI draft generation for a videography agency called ALX.
+
+TEMPLATE SUBJECT: ${templateSubject}
+TEMPLATE BODY: ${templateBody}
+
+TARGET NICHE: ${niche}
+SAMPLE LEADS:
+${leadSample}
+
+Your job: identify genuine uncertainties that would make it hard to write a good personalised email. Only ask questions if they would materially change how you write the email.
+
+Examples of good questions:
+- Many leads have no website — should I skip mentioning websites or use their company name instead?
+- The template references a specific service but doesn't describe it — what does ALX offer for this niche?
+- Should the tone be formal (B2B) or casual for this niche?
+
+Do NOT ask obvious questions or anything that can be inferred from the template/lead data.
+
+If everything is clear, return hasQuestions: false with an empty array.
+
+Return this exact JSON format:
+{
+  "hasQuestions": true,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "The question to show the user",
+      "hint": "A short placeholder/example answer to guide them"
+    }
+  ]
+}`;
+  const { result: response } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName });
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)));
+    return res.response;
+  });
+  const text = response.text();
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) return { hasQuestions: false, questions: [] };
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      hasQuestions: !!parsed.hasQuestions && parsed.questions?.length > 0,
+      questions: parsed.questions || []
+    };
+  } catch {
+    return { hasQuestions: false, questions: [] };
+  }
+}
 async function analysePortfolio(examples, niches, userReply, previousAnalysis) {
   const client = getClient$1();
   const examplesList = examples.map((e, i) => `${i + 1}. [ID: ${e.id}] Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : " | No description"}`).join("\n");
@@ -1136,7 +1262,7 @@ function registerCampaignsHandlers() {
     "campaigns:getLeadIds",
     (_e, campaignId) => getCampaignLeadIds(campaignId)
   );
-  electron.ipcMain.handle("campaigns:generateDrafts", async (event, campaignId) => {
+  electron.ipcMain.handle("campaigns:generateDrafts", async (event, campaignId, extraContext) => {
     const campaign = getCampaignById(campaignId);
     if (!campaign) throw new Error("Campaign not found");
     if (!campaign.template_id) throw new Error("No template assigned to campaign");
@@ -1168,7 +1294,8 @@ function registerCampaignsHandlers() {
               website: lead.website || void 0,
               niche: lead.niche_name || void 0
             },
-            portfolioExamples.length > 0 ? portfolioExamples : void 0
+            portfolioExamples.length > 0 ? portfolioExamples : void 0,
+            extraContext
           );
           subject = draft.subject;
           body = draft.body;
@@ -1207,6 +1334,20 @@ function registerCampaignsHandlers() {
     updateCampaign(campaignId, { status: "drafts_ready" });
     return { generated, total: leads.length, errors };
   });
+  electron.ipcMain.handle("campaigns:preflight", async (_e, campaignId) => {
+    const campaign = getCampaignById(campaignId);
+    if (!campaign?.template_id) return { hasQuestions: false, questions: [] };
+    const template = getTemplateById(campaign.template_id);
+    if (!template) return { hasQuestions: false, questions: [] };
+    const leadIds = getCampaignLeadIds(campaignId);
+    const sampleLeads = leadIds.slice(0, 4).map((id) => getLeadById(id)).filter((l) => !!l);
+    return preflightCheck(
+      template.subject,
+      template.body,
+      campaign.niche_name || "General",
+      sampleLeads
+    );
+  });
 }
 function registerEmailsHandlers() {
   electron.ipcMain.handle(
@@ -1236,6 +1377,35 @@ function registerEmailsHandlers() {
   });
   electron.ipcMain.handle("emails:getStats", () => getEmailStats());
   electron.ipcMain.handle("emails:getQueuedCount", () => getQueuedEmailCount());
+  electron.ipcMain.handle("emails:regenerate", async (_e, emailId, feedback) => {
+    const email = getEmailById(emailId);
+    if (!email) throw new Error("Email not found");
+    const lead = getLeadById(email.lead_id);
+    if (!lead) throw new Error("Lead not found");
+    const template = email.template_id ? getTemplateById(email.template_id) : null;
+    const portfolioExamples = getAllExamples();
+    const draft = await regenerateDraft(
+      template?.subject || email.subject,
+      template?.body || email.body,
+      {
+        first_name: lead.first_name,
+        last_name: lead.last_name || void 0,
+        company: lead.company || void 0,
+        website: lead.website || void 0,
+        niche: lead.niche_name || void 0
+      },
+      { subject: email.subject, body: email.body },
+      feedback,
+      portfolioExamples.length > 0 ? portfolioExamples : void 0
+    );
+    updateEmail(emailId, {
+      subject: draft.subject,
+      body: draft.body,
+      personalization_notes: draft.personalizationNotes
+    });
+    logger.info(`Draft regenerated for ${lead.email} with feedback: "${feedback.substring(0, 60)}"`);
+    return getEmailById(emailId);
+  });
 }
 let oauth2Client = null;
 const SCOPES = [

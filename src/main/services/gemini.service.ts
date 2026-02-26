@@ -9,8 +9,11 @@ const DRAFT_MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.0-
 const CLASSIFY_MODELS = ['gemini-3-flash-preview', 'gemini-2.5-flash', 'gemini-2.0-flash']
 
 let genAI: GoogleGenerativeAI | null = null
-let lastRequestTime = 0
-const MIN_REQUEST_INTERVAL = 6700 // ~9 RPM to stay under 10 RPM
+
+// Sliding window rate limiter — allows concurrent workers up to 9 req/min
+const WINDOW_MS = 60_000
+const MAX_REQUESTS_PER_WINDOW = 9
+const requestTimestamps: number[] = []
 
 function getClient(): GoogleGenerativeAI {
   const apiKey = settingsService.get('gemini_api_key') || process.env.GEMINI_API_KEY || ''
@@ -26,13 +29,22 @@ export function resetClient(): void {
 }
 
 async function rateLimitedRequest<T>(fn: () => Promise<T>): Promise<T> {
-  const now = Date.now()
-  const timeSinceLastRequest = now - lastRequestTime
-  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-    await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest))
+  // eslint-disable-next-line no-constant-condition
+  while (true) {
+    const now = Date.now()
+    // Evict timestamps outside the window
+    while (requestTimestamps.length > 0 && requestTimestamps[0] <= now - WINDOW_MS) {
+      requestTimestamps.shift()
+    }
+    if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
+      requestTimestamps.push(now)
+      return fn()
+    }
+    // Window full — wait until oldest slot expires
+    const waitMs = requestTimestamps[0] + WINDOW_MS - now + 50
+    logger.info(`Rate limiter: window full (${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW}), waiting ${Math.round(waitMs / 1000)}s`)
+    await new Promise((resolve) => setTimeout(resolve, waitMs))
   }
-  lastRequestTime = Date.now()
-  return fn()
 }
 
 // Retry with exponential backoff — handles 429 rate limits automatically
@@ -99,7 +111,8 @@ export async function generateDraft(
     niche?: string
   },
   portfolioExamples?: Array<{ title: string; url: string; description: string | null }>,
-  extraContext?: string
+  extraContext?: string,
+  brief?: CampaignBrief
 ): Promise<{ subject: string; body: string; personalizationNotes: string }> {
   const client = getClient()
 
@@ -118,13 +131,23 @@ When including examples in the email, replace the template's existing example li
     ? `\nADDITIONAL CONTEXT FROM USER:\n${extraContext}\n`
     : ''
 
+  const briefSection = brief
+    ? `\nCAMPAIGN BRIEF (follow these rules for all drafts in this campaign):
+- Niche context: ${brief.nicheContext}
+- Personalisation angles: ${brief.personalizationAngles}
+- Tone: ${brief.toneGuidance}
+- Missing data: ${brief.missingDataHandling}
+- Portfolio focus: ${brief.portfolioFocus}
+`
+    : ''
+
   const prompt = `You are an email personalization assistant for a videography agency called ALX.
 
 Given this email template and lead information, generate a personalized email.
 
 TEMPLATE SUBJECT: ${templateSubject}
 TEMPLATE BODY: ${templateBody}
-${portfolioSection}${extraContextSection}
+${portfolioSection}${briefSection}${extraContextSection}
 LEAD INFO:
 - First Name: ${lead.first_name}
 - Last Name: ${lead.last_name || 'N/A'}
@@ -416,6 +439,97 @@ Return this exact JSON format:
     }
   } catch {
     return { hasQuestions: false, questions: [] }
+  }
+}
+
+export interface CampaignBrief {
+  nicheContext: string
+  personalizationAngles: string
+  toneGuidance: string
+  missingDataHandling: string
+  portfolioFocus: string
+}
+
+export async function generateCampaignBrief(
+  templateSubject: string,
+  templateBody: string,
+  niche: string,
+  sampleLeads: Array<{ first_name: string; last_name?: string; company?: string; website?: string }>,
+  portfolioExamples: Array<{ title: string; url: string; description: string | null }>
+): Promise<CampaignBrief> {
+  const client = getClient()
+
+  const leadSample = sampleLeads
+    .slice(0, 4)
+    .map((l, i) => `${i + 1}. ${l.first_name} ${l.last_name || ''} | Company: ${l.company || 'none'} | Website: ${l.website || 'none'}`)
+    .join('\n')
+
+  const portfolioList = portfolioExamples.length > 0
+    ? portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ''}`).join('\n')
+    : 'No portfolio examples available.'
+
+  const prompt = `You are a campaign strategist for ALX, a videography agency doing cold email outreach.
+
+Before a batch of AI workers write personalised emails, create a strategic brief they will all follow.
+
+TEMPLATE SUBJECT: ${templateSubject}
+TEMPLATE BODY: ${templateBody}
+
+TARGET NICHE: ${niche}
+SAMPLE LEADS:
+${leadSample}
+
+AVAILABLE PORTFOLIO:
+${portfolioList}
+
+Write a concise brief covering:
+1. nicheContext: What this industry cares about, common pain points video content addresses (2-3 sentences)
+2. personalizationAngles: Best 2-3 ways to personalise using company/website/name (2-3 sentences, specific)
+3. toneGuidance: Formal vs casual, B2B vs B2C nuances, language to lean into (1-2 sentences)
+4. missingDataHandling: Exact fallback strategy when company or website is missing — don't say "skip it", say what to write instead (2 sentences)
+5. portfolioFocus: Which portfolio examples to prioritise for this niche, name specific ones (2 sentences)
+
+Be direct and actionable. Workers need rules, not vague advice.
+
+Return this exact JSON:
+{
+  "nicheContext": "...",
+  "personalizationAngles": "...",
+  "toneGuidance": "...",
+  "missingDataHandling": "...",
+  "portfolioFocus": "..."
+}`
+
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName })
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)))
+    return res.response
+  })
+
+  const text = response.text()
+  logUsage('campaign_brief', modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0)
+  logger.info(`Campaign brief generated using ${modelUsed}`)
+
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) throw new Error('No JSON in brief response')
+    const parsed = JSON.parse(jsonMatch[0])
+    return {
+      nicheContext: parsed.nicheContext || '',
+      personalizationAngles: parsed.personalizationAngles || '',
+      toneGuidance: parsed.toneGuidance || '',
+      missingDataHandling: parsed.missingDataHandling || '',
+      portfolioFocus: parsed.portfolioFocus || ''
+    }
+  } catch (err) {
+    logger.error('Failed to parse campaign brief, using fallback:', (err as Error).message)
+    return {
+      nicheContext: `Target niche: ${niche}`,
+      personalizationAngles: "Use the lead's company name and first name for personalisation.",
+      toneGuidance: 'Professional but warm tone.',
+      missingDataHandling: "If no website is available, reference the company name only. If no company, address the lead by first name only.",
+      portfolioFocus: 'Use the most relevant portfolio examples for this industry.'
+    }
   }
 }
 
