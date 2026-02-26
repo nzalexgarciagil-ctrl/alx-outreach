@@ -442,6 +442,83 @@ Return this exact JSON format:
   }
 }
 
+export interface TemplateVariant {
+  label: string
+  subject: string
+  body: string
+}
+
+export async function generateTemplateVariants(
+  templateSubject: string,
+  templateBody: string,
+  niche: string,
+  portfolioExamples: Array<{ title: string; url: string; description: string | null }>,
+  feedback?: string
+): Promise<TemplateVariant[]> {
+  const client = getClient()
+
+  const portfolioList = portfolioExamples.length > 0
+    ? portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ''}`).join('\n')
+    : 'No portfolio examples available.'
+
+  const feedbackSection = feedback ? `\nUSER FEEDBACK TO INCORPORATE:\n${feedback}\n` : ''
+
+  const prompt = `You are an email copywriter for ALX, a videography agency doing cold email outreach.
+
+Generate 3 different template variants based on the template below. Each variant takes a different angle or hook, but keeps the same core offer and length.
+
+RULES:
+- Keep ALL {{variable}} placeholders EXACTLY as-is ({{first_name}}, {{company}}, {{last_name}}, {{website}}, {{niche}}) — do not fill them in
+- Each variant should have a different opening angle (e.g. "Direct offer", "Question hook", "Social proof angle")
+- Same length as the original — don't shorten
+- No em dashes (—), no AI buzzwords, write like a real person
+- Keep any portfolio link lines exactly as formatted in the original
+
+TARGET NICHE: ${niche}
+
+AVAILABLE PORTFOLIO:
+${portfolioList}
+${feedbackSection}
+BASE TEMPLATE SUBJECT: ${templateSubject}
+BASE TEMPLATE BODY:
+${templateBody}
+
+Return exactly this JSON format:
+[
+  {
+    "label": "Short name for this variant e.g. 'Direct'",
+    "subject": "subject line with {{variables}} kept intact",
+    "body": "email body with {{variables}} kept intact, \\n for line breaks"
+  },
+  { "label": "...", "subject": "...", "body": "..." },
+  { "label": "...", "subject": "...", "body": "..." }
+]`
+
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName })
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)))
+    return res.response
+  })
+
+  const text = response.text()
+  logUsage('template_variants', modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0)
+  logger.info(`Template variants generated using ${modelUsed}`)
+
+  try {
+    const jsonMatch = text.match(/\[[\s\S]*\]/)
+    if (!jsonMatch) throw new Error('No JSON array in response')
+    const parsed = JSON.parse(jsonMatch[0])
+    return parsed.map((v: TemplateVariant) => ({
+      label: v.label || 'Variant',
+      subject: v.subject || templateSubject,
+      body: v.body || templateBody
+    }))
+  } catch (err) {
+    logger.error('Failed to parse template variants:', text)
+    throw new Error(`Failed to parse variants: ${(err as Error).message}`)
+  }
+}
+
 export interface CampaignBrief {
   nicheContext: string
   personalizationAngles: string

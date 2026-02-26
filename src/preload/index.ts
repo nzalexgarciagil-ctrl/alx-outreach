@@ -56,6 +56,8 @@ const api = {
       ipcRenderer.invoke('campaigns:addLeads', campaignId, leadIds),
     getLeadIds: (campaignId: string) => ipcRenderer.invoke('campaigns:getLeadIds', campaignId),
     generateDrafts: (campaignId: string, extraContext?: string, workerCount?: number) => ipcRenderer.invoke('campaigns:generateDrafts', campaignId, extraContext, workerCount),
+    generateVariants: (campaignId: string, feedback?: string) => ipcRenderer.invoke('campaigns:generateVariants', campaignId, feedback),
+    createDraftsFromVariants: (campaignId: string, variants: unknown[]) => ipcRenderer.invoke('campaigns:createDraftsFromVariants', campaignId, variants),
     preflight: (campaignId: string) => ipcRenderer.invoke('campaigns:preflight', campaignId)
   },
 

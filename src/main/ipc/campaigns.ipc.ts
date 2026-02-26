@@ -141,6 +141,65 @@ export function registerCampaignsHandlers(): void {
     return { generated, total: allLeads.length, errors }
   })
 
+  // Quick mode: generate template variants (3 different angle variants)
+  ipcMain.handle('campaigns:generateVariants', async (_e, campaignId: string, feedback?: string) => {
+    const campaign = campaignsRepo.getCampaignById(campaignId)
+    if (!campaign?.template_id) throw new Error('No template assigned to campaign')
+
+    const template = templatesRepo.getTemplateById(campaign.template_id)
+    if (!template) throw new Error('Template not found')
+
+    const portfolioExamples = portfolioRepo.getAllExamples()
+
+    return geminiService.generateTemplateVariants(
+      template.subject,
+      template.body,
+      campaign.niche_name || 'General',
+      portfolioExamples,
+      feedback
+    )
+  })
+
+  // Quick mode: create drafts by doing find-replace on selected variants (no per-email AI)
+  ipcMain.handle('campaigns:createDraftsFromVariants', (_e, campaignId: string, variants: geminiService.TemplateVariant[]) => {
+    const campaign = campaignsRepo.getCampaignById(campaignId)
+    if (!campaign?.template_id) throw new Error('Campaign not found')
+
+    const leadIds = campaignsRepo.getCampaignLeadIds(campaignId)
+    const leads = leadIds
+      .map((id) => leadsRepo.getLeadById(id))
+      .filter((l): l is NonNullable<typeof l> => !!l)
+
+    // Delete existing drafts for this campaign first (so re-generation is clean)
+    const existing = emailsRepo.getEmailsByCampaign(campaignId, 'draft')
+    existing.forEach((e) => emailsRepo.deleteEmail(e.id))
+
+    let created = 0
+    leads.forEach((lead, index) => {
+      // Round-robin across selected variants
+      const variant = variants[index % variants.length]
+      const vars: templateService.TemplateVars = {
+        first_name: lead.first_name,
+        last_name: lead.last_name || '',
+        company: lead.company || '',
+        website: lead.website || '',
+        niche: lead.niche_name || ''
+      }
+      emailsRepo.createEmail({
+        campaign_id: campaignId,
+        lead_id: lead.id,
+        template_id: campaign.template_id!,
+        subject: templateService.renderTemplate(variant.subject, vars),
+        body: templateService.renderTemplate(variant.body, vars),
+        personalization_notes: `Quick mode — ${variant.label}`
+      })
+      created++
+    })
+
+    campaignsRepo.updateCampaign(campaignId, { status: 'drafts_ready' })
+    return { created, total: leads.length }
+  })
+
   ipcMain.handle('campaigns:preflight', async (_e, campaignId: string) => {
     const campaign = campaignsRepo.getCampaignById(campaignId)
     if (!campaign?.template_id) return { hasQuestions: false, questions: [] }

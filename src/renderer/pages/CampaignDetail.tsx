@@ -19,7 +19,10 @@ import {
   Loader2,
   RefreshCw,
   HelpCircle,
-  X
+  X,
+  Zap,
+  Sparkles,
+  MessageSquare
 } from 'lucide-react'
 
 interface PreflightQuestion {
@@ -28,6 +31,14 @@ interface PreflightQuestion {
   hint: string
 }
 
+interface TemplateVariant {
+  label: string
+  subject: string
+  body: string
+}
+
+type GenerationMode = 'quick' | 'deep'
+
 export default function CampaignDetail() {
   const { id } = useParams<{ id: string }>()
   const navigate = useNavigate()
@@ -35,7 +46,10 @@ export default function CampaignDetail() {
   const [emails, setEmails] = useState<Email[]>([])
   const [tab, setTab] = useState('overview')
 
-  // Generation state
+  // Mode toggle
+  const [mode, setMode] = useState<GenerationMode>('quick')
+
+  // Generation state (deep mode)
   const [generating, setGenerating] = useState(false)
   const [genProgress, setGenProgress] = useState({ generated: 0, total: 0 })
   const [genErrors, setGenErrors] = useState<string[]>([])
@@ -48,11 +62,24 @@ export default function CampaignDetail() {
   const [preflightAnswers, setPreflightAnswers] = useState<Record<string, string>>({})
   const [showPreflight, setShowPreflight] = useState(false)
 
+  // Quick mode — variant generation
+  const [generatingVariants, setGeneratingVariants] = useState(false)
+  const [variants, setVariants] = useState<TemplateVariant[]>([])
+  const [editingVariant, setEditingVariant] = useState<number | null>(null)
+  const [editVariantForm, setEditVariantForm] = useState({ subject: '', body: '' })
+  const [variantFeedback, setVariantFeedback] = useState('')
+  const [creatingDrafts, setCreatingDrafts] = useState(false)
+
+  // Overall feedback
+  const [showOverallFeedback, setShowOverallFeedback] = useState(false)
+  const [overallFeedback, setOverallFeedback] = useState('')
+  const [applyingFeedback, setApplyingFeedback] = useState(false)
+
   // Manual edit
   const [editingEmail, setEditingEmail] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ subject: '', body: '' })
 
-  // AI feedback/regenerate
+  // Per-draft feedback/regenerate
   const [feedbackOpenFor, setFeedbackOpenFor] = useState<string | null>(null)
   const [feedbackText, setFeedbackText] = useState('')
   const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
@@ -80,13 +107,51 @@ export default function CampaignDetail() {
     setEmails(e)
   }
 
+  // --- Quick mode ---
+  const handleGenerateVariants = async (feedback?: string) => {
+    setGeneratingVariants(true)
+    try {
+      const result = await window.electronAPI.campaigns.generateVariants(id!, feedback) as TemplateVariant[]
+      setVariants(result)
+      setVariantFeedback('')
+    } catch (err) {
+      setGenErrors([`Variant generation failed: ${(err as Error).message}`])
+    } finally {
+      setGeneratingVariants(false)
+    }
+  }
+
+  const handleCreateDraftsFromVariants = async () => {
+    setCreatingDrafts(true)
+    try {
+      await window.electronAPI.campaigns.createDraftsFromVariants(id!, variants)
+      setVariants([])
+      await loadData()
+      setTab('drafts')
+    } catch (err) {
+      setGenErrors([`Failed to create drafts: ${(err as Error).message}`])
+    } finally {
+      setCreatingDrafts(false)
+    }
+  }
+
+  const startEditVariant = (i: number) => {
+    setEditingVariant(i)
+    setEditVariantForm({ subject: variants[i].subject, body: variants[i].body })
+  }
+
+  const saveEditVariant = () => {
+    if (editingVariant === null) return
+    setVariants(prev => prev.map((v, i) => i === editingVariant ? { ...v, ...editVariantForm } : v))
+    setEditingVariant(null)
+  }
+
+  // --- Deep mode ---
   const handleGenerateClick = async () => {
-    // Run preflight first
     setPreflightChecking(true)
     try {
       const result = await window.electronAPI.campaigns.preflight(id!) as {
-        hasQuestions: boolean
-        questions: PreflightQuestion[]
+        hasQuestions: boolean; questions: PreflightQuestion[]
       }
       if (result.hasQuestions && result.questions.length > 0) {
         setPreflightQuestions(result.questions)
@@ -94,11 +159,8 @@ export default function CampaignDetail() {
         setShowPreflight(true)
         return
       }
-    } catch {
-      // Preflight failed — just proceed without it
-    } finally {
-      setPreflightChecking(false)
-    }
+    } catch { /* preflight failing is non-fatal */ }
+    finally { setPreflightChecking(false) }
     runGeneration()
   }
 
@@ -111,9 +173,7 @@ export default function CampaignDetail() {
     setGenWorkers(0)
     try {
       const result = await window.electronAPI.campaigns.generateDrafts(id!, extraContext) as {
-        generated: number
-        total: number
-        errors: string[]
+        generated: number; total: number; errors: string[]
       }
       if (result.errors?.length > 0) setGenErrors(result.errors)
       loadData()
@@ -135,6 +195,26 @@ export default function CampaignDetail() {
     runGeneration(answersText || undefined)
   }
 
+  // --- Overall feedback ---
+  const handleOverallFeedback = async () => {
+    if (!overallFeedback.trim()) return
+    setApplyingFeedback(true)
+    try {
+      if (mode === 'quick' && variants.length > 0) {
+        // In quick mode: regenerate variants with the feedback
+        await handleGenerateVariants(overallFeedback.trim())
+      } else {
+        // In deep mode: pass feedback as extraContext and regenerate all drafts
+        await runGeneration(overallFeedback.trim())
+      }
+      setOverallFeedback('')
+      setShowOverallFeedback(false)
+    } finally {
+      setApplyingFeedback(false)
+    }
+  }
+
+  // --- Per-draft actions ---
   const handleApprove = async (emailId: string) => {
     await window.electronAPI.emails.approve(emailId)
     loadData()
@@ -170,11 +250,6 @@ export default function CampaignDetail() {
     loadData()
   }
 
-  const openFeedback = (emailId: string) => {
-    setFeedbackOpenFor(emailId)
-    setFeedbackText('')
-  }
-
   const handleRegenerate = async (emailId: string) => {
     if (!feedbackText.trim()) return
     setRegeneratingId(emailId)
@@ -184,7 +259,6 @@ export default function CampaignDetail() {
       setFeedbackText('')
       loadData()
     } catch (err) {
-      // error will show in the card
       console.error('Regenerate failed:', err)
     } finally {
       setRegeneratingId(null)
@@ -199,6 +273,8 @@ export default function CampaignDetail() {
   const sent = emails.filter((e) => e.status === 'sent')
   const failed = emails.filter((e) => e.status === 'failed')
 
+  const busy = generating || generatingVariants || creatingDrafts || preflightChecking
+
   return (
     <div className="space-y-4">
       {/* Preflight modal */}
@@ -209,10 +285,7 @@ export default function CampaignDetail() {
               <HelpCircle className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
               <div className="flex-1">
                 <h3 className="font-semibold">Quick questions before generating</h3>
-                <p className="text-xs text-zinc-400 mt-0.5">
-                  The AI spotted a few things that would help it write better emails.
-                  Answer what you can — skip anything obvious.
-                </p>
+                <p className="text-xs text-zinc-400 mt-0.5">The AI spotted a few things that would help it write better emails.</p>
               </div>
               <button onClick={() => { setShowPreflight(false); runGeneration() }} className="text-zinc-500 hover:text-zinc-300">
                 <X className="w-4 h-4" />
@@ -242,6 +315,7 @@ export default function CampaignDetail() {
         </div>
       )}
 
+      {/* Header */}
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon" onClick={() => navigate('/campaigns')}>
           <ArrowLeft className="w-4 h-4" />
@@ -274,31 +348,67 @@ export default function CampaignDetail() {
         ))}
       </div>
 
-      {/* Actions */}
-      <div className="flex gap-2">
-        <Button
-          size="sm"
-          onClick={handleGenerateClick}
-          disabled={generating || preflightChecking || campaign.total_leads === 0}
-        >
-          {(generating || preflightChecking) ? (
-            <Loader2 className="w-3 h-3 animate-spin" />
-          ) : (
-            <Wand2 className="w-3 h-3" />
-          )}
-          {preflightChecking
-            ? 'Checking template...'
-            : generating && genPhase === 'briefing'
-            ? 'Creating brief...'
-            : generating
-            ? `Generating (${genProgress.generated}/${genProgress.total})`
-            : 'Generate AI Drafts'}
-        </Button>
-        {drafts.length > 0 && (
-          <Button variant="outline" size="sm" onClick={handleApproveAll}>
-            <CheckCheck className="w-3 h-3" /> Approve All Drafts
+      {/* Mode toggle + actions */}
+      <div className="flex items-center gap-2 flex-wrap">
+        {/* Mode toggle */}
+        <div className="flex rounded-lg border border-white/10 overflow-hidden mr-2">
+          <button
+            onClick={() => setMode('quick')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${
+              mode === 'quick' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <Zap className="w-3 h-3" /> Quick
+          </button>
+          <button
+            onClick={() => setMode('deep')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium transition-colors ${
+              mode === 'deep' ? 'bg-cyan-500/20 text-cyan-300' : 'text-zinc-500 hover:text-zinc-300'
+            }`}
+          >
+            <Sparkles className="w-3 h-3" /> Deep AI
+          </button>
+        </div>
+
+        {mode === 'quick' ? (
+          <Button
+            size="sm"
+            onClick={() => handleGenerateVariants()}
+            disabled={busy || campaign.total_leads === 0}
+          >
+            {generatingVariants ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+            {generatingVariants ? 'Writing variants...' : variants.length > 0 ? 'Regenerate Variants' : 'Generate Template Variants'}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            onClick={handleGenerateClick}
+            disabled={busy || campaign.total_leads === 0}
+          >
+            {(generating || preflightChecking) ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
+            {preflightChecking ? 'Checking template...'
+              : generating && genPhase === 'briefing' ? 'Creating brief...'
+              : generating ? `Generating (${genProgress.generated}/${genProgress.total})`
+              : 'Generate AI Drafts'}
           </Button>
         )}
+
+        {drafts.length > 0 && (
+          <>
+            <Button variant="outline" size="sm" onClick={handleApproveAll}>
+              <CheckCheck className="w-3 h-3" /> Approve All
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => setShowOverallFeedback(!showOverallFeedback)}
+              className={showOverallFeedback ? 'border-cyan-500/40 text-cyan-400' : ''}
+            >
+              <MessageSquare className="w-3 h-3" /> Overall feedback
+            </Button>
+          </>
+        )}
+
         {approved.length > 0 && (
           <Button variant="outline" size="sm" onClick={handleQueueApproved}>
             <Send className="w-3 h-3" /> Queue {approved.length} for Sending
@@ -306,12 +416,35 @@ export default function CampaignDetail() {
         )}
       </div>
 
+      {/* Overall feedback panel */}
+      {showOverallFeedback && (
+        <GlassCard className="space-y-2 border border-cyan-500/20 bg-cyan-500/5 p-4">
+          <p className="text-xs text-zinc-400">
+            {mode === 'quick'
+              ? 'Feedback will be applied to all template variants and drafts will be recreated.'
+              : 'Feedback will be passed to the AI and all drafts regenerated.'}
+          </p>
+          <div className="flex gap-2">
+            <Input
+              placeholder='e.g. "make all emails shorter", "more casual tone", "don\'t mention pricing"'
+              value={overallFeedback}
+              onChange={(e) => setOverallFeedback(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter' && overallFeedback.trim()) handleOverallFeedback() }}
+            />
+            <Button size="sm" onClick={handleOverallFeedback} disabled={!overallFeedback.trim() || applyingFeedback}>
+              {applyingFeedback ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+              Apply
+            </Button>
+          </div>
+        </GlassCard>
+      )}
+
+      {/* Deep mode progress */}
       {generating && (
         <div className="space-y-1.5">
           {genPhase === 'briefing' ? (
             <p className="text-xs text-zinc-400 flex items-center gap-1.5">
-              <Loader2 className="w-3 h-3 animate-spin" />
-              Creating campaign brief...
+              <Loader2 className="w-3 h-3 animate-spin" /> Creating campaign brief...
             </p>
           ) : genProgress.total > 0 ? (
             <>
@@ -328,7 +461,7 @@ export default function CampaignDetail() {
       {genErrors.length > 0 && (
         <GlassCard className="space-y-2 border border-red-500/20 bg-red-500/5 p-4">
           <p className="text-xs font-medium text-red-400">
-            {genErrors.length} draft{genErrors.length !== 1 ? 's' : ''} failed to generate:
+            {genErrors.length} draft{genErrors.length !== 1 ? 's' : ''} failed:
           </p>
           <ul className="space-y-1">
             {genErrors.map((err, i) => (
@@ -336,6 +469,86 @@ export default function CampaignDetail() {
             ))}
           </ul>
         </GlassCard>
+      )}
+
+      {/* Quick mode: variant review */}
+      {variants.length > 0 && (
+        <div className="space-y-3">
+          <div className="flex items-center justify-between">
+            <div>
+              <p className="text-sm font-medium">{variants.length} template variants — review & edit, then create drafts</p>
+              <p className="text-xs text-zinc-500 mt-0.5">
+                Leads will be split round-robin across all variants. No per-email AI — instant.
+              </p>
+            </div>
+            <div className="flex items-center gap-2">
+              <div className="flex gap-2">
+                <Input
+                  placeholder="Feedback to tweak all variants..."
+                  value={variantFeedback}
+                  onChange={(e) => setVariantFeedback(e.target.value)}
+                  className="text-xs w-56"
+                  onKeyDown={(e) => {
+                    if (e.key === 'Enter' && variantFeedback.trim()) handleGenerateVariants(variantFeedback.trim())
+                  }}
+                />
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onClick={() => handleGenerateVariants(variantFeedback.trim() || undefined)}
+                  disabled={generatingVariants}
+                >
+                  {generatingVariants ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
+                </Button>
+              </div>
+              <Button size="sm" onClick={handleCreateDraftsFromVariants} disabled={creatingDrafts}>
+                {creatingDrafts ? <Loader2 className="w-3 h-3 animate-spin" /> : <Zap className="w-3 h-3" />}
+                {creatingDrafts ? 'Creating...' : `Create ${campaign.total_leads} Drafts`}
+              </Button>
+            </div>
+          </div>
+
+          {variants.map((v, i) => (
+            <GlassCard key={i} className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <Badge variant="outline" className="text-cyan-400 border-cyan-500/30 text-xs">{v.label}</Badge>
+                  <span className="text-xs text-zinc-500">~{Math.ceil(campaign.total_leads / variants.length)} leads</span>
+                </div>
+                {editingVariant === i ? (
+                  <Button size="sm" onClick={saveEditVariant}>Save</Button>
+                ) : (
+                  <Button variant="ghost" size="icon" onClick={() => startEditVariant(i)}>
+                    <Edit className="w-3.5 h-3.5" />
+                  </Button>
+                )}
+              </div>
+
+              {editingVariant === i ? (
+                <div className="space-y-2">
+                  <Input
+                    value={editVariantForm.subject}
+                    onChange={(e) => setEditVariantForm({ ...editVariantForm, subject: e.target.value })}
+                    className="text-sm"
+                  />
+                  <Textarea
+                    value={editVariantForm.body}
+                    onChange={(e) => setEditVariantForm({ ...editVariantForm, body: e.target.value })}
+                    rows={8}
+                    className="text-sm font-mono"
+                  />
+                </div>
+              ) : (
+                <>
+                  <p className="text-xs text-zinc-400">Subject: {v.subject}</p>
+                  <p className="text-sm text-zinc-300 whitespace-pre-wrap pl-2 border-l-2 border-white/5 max-h-48 overflow-y-auto">
+                    {v.body}
+                  </p>
+                </>
+              )}
+            </GlassCard>
+          ))}
+        </div>
       )}
 
       {/* Tabs */}
@@ -353,12 +566,11 @@ export default function CampaignDetail() {
             <p className="text-sm text-zinc-400">
               Campaign created on {new Date(campaign.created_at).toLocaleDateString()}.
               {campaign.total_leads > 0 && ` ${campaign.total_leads} leads targeted.`}
-              {sent.length > 0 &&
-                ` ${sent.length} emails sent. Response rate: ${
-                  campaign.total_replied > 0
-                    ? ((campaign.total_replied / sent.length) * 100).toFixed(1)
-                    : '0'
-                }%`}
+              {sent.length > 0 && ` ${sent.length} emails sent. Response rate: ${
+                campaign.total_replied > 0
+                  ? ((campaign.total_replied / sent.length) * 100).toFixed(1)
+                  : '0'
+              }%`}
             </p>
           </GlassCard>
         </TabsContent>
@@ -367,7 +579,7 @@ export default function CampaignDetail() {
           <div className="space-y-3">
             {drafts.length === 0 && (
               <p className="text-zinc-500 text-sm text-center py-8">
-                No drafts. Click "Generate AI Drafts" to create them.
+                No drafts yet. {mode === 'quick' ? 'Generate variants above then click "Create Drafts".' : 'Click "Generate AI Drafts" to create them.'}
               </p>
             )}
             {drafts.map((email) => (
@@ -397,7 +609,7 @@ export default function CampaignDetail() {
                           variant="ghost"
                           size="icon"
                           title="Regenerate with feedback"
-                          onClick={() => feedbackOpenFor === email.id ? setFeedbackOpenFor(null) : openFeedback(email.id)}
+                          onClick={() => feedbackOpenFor === email.id ? setFeedbackOpenFor(null) : (setFeedbackOpenFor(email.id), setFeedbackText(''))}
                           className={feedbackOpenFor === email.id ? 'text-cyan-400' : ''}
                         >
                           <RefreshCw className="w-3.5 h-3.5" />
@@ -405,20 +617,10 @@ export default function CampaignDetail() {
                         <Button variant="ghost" size="icon" onClick={() => startEdit(email)}>
                           <Edit className="w-3.5 h-3.5" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleApprove(email.id)}
-                          className="text-green-400 hover:text-green-300"
-                        >
+                        <Button variant="ghost" size="icon" onClick={() => handleApprove(email.id)} className="text-green-400 hover:text-green-300">
                           <CheckCircle className="w-4 h-4" />
                         </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          onClick={() => handleReject(email.id)}
-                          className="text-red-400 hover:text-red-300"
-                        >
+                        <Button variant="ghost" size="icon" onClick={() => handleReject(email.id)} className="text-red-400 hover:text-red-300">
                           <XCircle className="w-4 h-4" />
                         </Button>
                       </>
@@ -438,13 +640,12 @@ export default function CampaignDetail() {
                   </p>
                 )}
 
-                {/* AI feedback panel */}
                 {feedbackOpenFor === email.id && (
                   <div className="mt-3 pt-3 border-t border-white/5 space-y-2">
                     <p className="text-xs text-zinc-400">Tell the AI what to change:</p>
                     <div className="flex gap-2">
                       <Input
-                        placeholder='e.g. "make it shorter", "mention their Instagram", "more casual tone"'
+                        placeholder='"make it shorter", "mention their Instagram", "more casual tone"'
                         value={feedbackText}
                         onChange={(e) => setFeedbackText(e.target.value)}
                         onKeyDown={(e) => {
@@ -459,11 +660,7 @@ export default function CampaignDetail() {
                         onClick={() => handleRegenerate(email.id)}
                         disabled={!feedbackText.trim() || regeneratingId === email.id}
                       >
-                        {regeneratingId === email.id ? (
-                          <Loader2 className="w-3 h-3 animate-spin" />
-                        ) : (
-                          <RefreshCw className="w-3 h-3" />
-                        )}
+                        {regeneratingId === email.id ? <Loader2 className="w-3 h-3 animate-spin" /> : <RefreshCw className="w-3 h-3" />}
                         {regeneratingId === email.id ? 'Rewriting...' : 'Rewrite'}
                       </Button>
                     </div>
@@ -471,9 +668,7 @@ export default function CampaignDetail() {
                 )}
 
                 {email.personalization_notes && (
-                  <p className="text-xs text-cyan-400/60 mt-2">
-                    AI: {email.personalization_notes}
-                  </p>
+                  <p className="text-xs text-cyan-400/60 mt-2">AI: {email.personalization_notes}</p>
                 )}
               </GlassCard>
             ))}
@@ -486,14 +681,10 @@ export default function CampaignDetail() {
               <GlassCard key={email.id}>
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="font-medium text-sm">
-                      {email.lead_first_name} — {email.subject}
-                    </p>
+                    <p className="font-medium text-sm">{email.lead_first_name} — {email.subject}</p>
                     <p className="text-xs text-zinc-500">{email.lead_email}</p>
                   </div>
-                  <Badge variant={email.status === 'queued' ? 'default' : 'success'}>
-                    {email.status}
-                  </Badge>
+                  <Badge variant={email.status === 'queued' ? 'default' : 'success'}>{email.status}</Badge>
                 </div>
               </GlassCard>
             ))}
@@ -506,9 +697,7 @@ export default function CampaignDetail() {
               <GlassCard key={email.id}>
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="font-medium text-sm">
-                      {email.lead_first_name} — {email.subject}
-                    </p>
+                    <p className="font-medium text-sm">{email.lead_first_name} — {email.subject}</p>
                     <p className="text-xs text-zinc-500">
                       Sent {email.sent_at ? new Date(email.sent_at).toLocaleString() : ''}
                     </p>
