@@ -116,7 +116,9 @@ const api = {
     getAll: () => ipcRenderer.invoke('portfolio:getAll'),
     create: (data: unknown) => ipcRenderer.invoke('portfolio:create', data),
     update: (id: string, data: unknown) => ipcRenderer.invoke('portfolio:update', id, data),
-    delete: (id: string) => ipcRenderer.invoke('portfolio:delete', id)
+    delete: (id: string) => ipcRenderer.invoke('portfolio:delete', id),
+    analyse: (examples: unknown, userReply?: string, previousAnalysis?: string) =>
+      ipcRenderer.invoke('portfolio:analyse', examples, userReply, previousAnalysis)
   },
 
   // Event listeners

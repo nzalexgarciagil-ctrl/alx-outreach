@@ -250,6 +250,79 @@ Return your response in this exact JSON format:
   }
 }
 
+export async function analysePortfolio(
+  examples: Array<{ title: string; url: string; description: string | null }>,
+  userReply?: string,
+  previousAnalysis?: string
+): Promise<{ message: string; suggestions: Array<{ id: string; title: string; original: string; improved: string }> }> {
+  const client = getClient()
+
+  const examplesList = examples
+    .map((e, i) => `${i + 1}. Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : ' | No description'}`)
+    .join('\n')
+
+  const conversationContext = previousAnalysis
+    ? `\nPREVIOUS ANALYSIS CONTEXT:\n${previousAnalysis}\n\nUSER REPLY: ${userReply || '(no reply)'}\n`
+    : ''
+
+  const prompt = `You are a portfolio optimisation assistant for ALX, a videography agency doing cold email outreach.
+
+Your job is to review the agency's portfolio examples and help make them more effective for AI-driven email personalisation. When the AI generates outreach emails, it picks 3-4 examples from this list that are most relevant to each lead's industry.
+
+CURRENT PORTFOLIO EXAMPLES:
+${examplesList}
+${conversationContext}
+Your goal: Help make each example's title and description as useful as possible so the AI can pick the right ones. Good titles are specific like "Speed ramp — Car dealership" or "Talking head — Real estate agent". Good descriptions explain the style, pace, and context in 1 sentence.
+
+${previousAnalysis ? 'Continue the conversation based on the user reply above. Give specific actionable suggestions based on their response.' : 'Review all examples and give your initial analysis. Ask one focused question to better understand their work so you can suggest improvements. Be direct and specific — no fluff.'}
+
+Return your response in this exact JSON format:
+{
+  "message": "your conversational message to the user (ask questions, give feedback, be direct and helpful)",
+  "suggestions": [
+    {
+      "id": "unique-id",
+      "title": "brief label for this suggestion",
+      "original": "the current title or description",
+      "improved": "your suggested improvement"
+    }
+  ]
+}
+
+Only include suggestions array items if you have specific improvements ready to suggest. Otherwise leave it as an empty array.`
+
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName })
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)))
+    return res.response
+  })
+
+  const text = response.text()
+
+  logUsage(
+    'portfolio_analysis',
+    modelUsed,
+    response.usageMetadata?.promptTokenCount || 0,
+    response.usageMetadata?.candidatesTokenCount || 0
+  )
+
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) throw new Error('No JSON found in response')
+    const parsed = JSON.parse(jsonMatch[0])
+    return {
+      message: parsed.message || 'Analysis complete.',
+      suggestions: parsed.suggestions || []
+    }
+  } catch (err) {
+    logger.error('Failed to parse portfolio analysis response:', text)
+    return {
+      message: text || 'Could not parse AI response. Please try again.',
+      suggestions: []
+    }
+  }
+}
+
 export function isConfigured(): boolean {
   const apiKey = settingsService.get('gemini_api_key') || process.env.GEMINI_API_KEY
   return !!apiKey
