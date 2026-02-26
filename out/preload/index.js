@@ -103,7 +103,8 @@ const api = {
     getAll: () => electron.ipcRenderer.invoke("portfolio:getAll"),
     create: (data) => electron.ipcRenderer.invoke("portfolio:create", data),
     update: (id, data) => electron.ipcRenderer.invoke("portfolio:update", id, data),
-    delete: (id) => electron.ipcRenderer.invoke("portfolio:delete", id)
+    delete: (id) => electron.ipcRenderer.invoke("portfolio:delete", id),
+    analyse: (examples, userReply, previousAnalysis) => electron.ipcRenderer.invoke("portfolio:analyse", examples, userReply, previousAnalysis)
   },
   // Event listeners
   on: (channel, callback) => {

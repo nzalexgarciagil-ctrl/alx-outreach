@@ -942,6 +942,19 @@ INSTRUCTIONS:
 4. Do NOT add a signature block — the template already includes it
 5. Preserve the full template length — do not shorten or summarise
 
+HUMANISATION RULES — the email must read like a real person wrote it, not AI:
+- Write like you're a real person sending a quick email, not a marketing bot
+- Use contractions naturally (I'm, I've, you've, it's, don't)
+- Vary sentence length — mix short punchy sentences with longer ones
+- BANNED words/phrases: "landscape", "pivotal", "underscore", "leverage", "utilize", "delve", "comprehensive", "robust", "innovative", "transformative", "seamlessly", "tailored", "streamline", "cutting-edge", "it's worth noting", "I hope this finds you well", "I hope this helps", "feel free to", "don't hesitate to", "as per", "please find"
+- No em dashes (—) — use commas or just end the sentence
+- No rule-of-three lists unless the template has them
+- No sycophantic openers or closers
+- No excessive hedging ("might potentially possibly")
+- Specific and direct — say exactly what you mean
+- If something is good, just say it's good — don't oversell it
+- The email should feel like it was typed by a real person in 10 minutes, not crafted by an AI for an hour
+
 Return your response in this exact JSON format:
 {
   "subject": "the personalized subject line",
@@ -963,7 +976,11 @@ Return your response in this exact JSON format:
   logger.info(`Draft generated using ${modelUsed}`);
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) throw new Error("No JSON found in response");
+    if (!jsonMatch) {
+      const truncated = text.substring(0, 300).replace(/\n/g, " ");
+      logger.error("Gemini refused or returned non-JSON:", truncated);
+      throw new Error(`Gemini refused: ${truncated}`);
+    }
     const parsed = JSON.parse(jsonMatch[0]);
     return {
       subject: parsed.subject,
@@ -972,7 +989,7 @@ Return your response in this exact JSON format:
     };
   } catch (err) {
     logger.error("Failed to parse Gemini draft response:", text);
-    throw new Error(`Failed to parse AI response: ${err.message}`);
+    throw err instanceof Error && err.message.startsWith("Gemini refused") ? err : new Error(`Failed to parse AI response: ${err.message}`);
   }
 }
 async function classifyReply(originalSubject, originalBody, replyBody) {
@@ -1026,6 +1043,78 @@ Return your response in this exact JSON format:
       classification: "follow_up",
       confidence: 0.5,
       reasoning: "Failed to classify automatically"
+    };
+  }
+}
+async function analysePortfolio(examples, niches, userReply, previousAnalysis) {
+  const client = getClient$1();
+  const examplesList = examples.map((e, i) => `${i + 1}. [ID: ${e.id}] Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : " | No description"}`).join("\n");
+  const nichesList = niches.length > 0 ? niches.map((n) => `- ${n.name} (${n.leadCount} leads)`).join("\n") : "No niches configured yet.";
+  const conversationContext = previousAnalysis ? `
+PREVIOUS ANALYSIS CONTEXT:
+${previousAnalysis}
+
+USER REPLY: ${userReply || "(no reply)"}
+` : "";
+  const prompt = `You are a portfolio optimisation assistant for ALX, a videography agency doing cold email outreach.
+
+When generating outreach emails, the AI picks 3-4 portfolio examples from the list that are most relevant to each lead's industry/niche. Your job is to make sure the portfolio is well-matched to the niches being targeted and that each example's title and description is as useful as possible for that matching.
+
+TARGET NICHES (who ALX is sending outreach to):
+${nichesList}
+
+CURRENT PORTFOLIO EXAMPLES:
+${examplesList}
+${conversationContext}
+Key things to assess:
+- Are there examples covering each target niche? Flag any niches with no matching examples.
+- Are titles specific enough? (e.g. "Speed ramp — Car dealership" beats "Speed ramp")
+- Do descriptions explain style, pace, and context in a way that helps match to industries?
+- Are there gaps — niches being targeted but no relevant example exists?
+
+${previousAnalysis ? "Continue the conversation based on the user reply above. Give specific actionable suggestions based on their response." : "Give your initial analysis. Highlight any niche gaps first, then suggest title/description improvements. Be direct — no fluff. Ask one focused question at the end if you need more info."}
+
+Return your response in this exact JSON format:
+{
+  "message": "your conversational message (use **bold**, bullet points with -, numbered lists where helpful — make it readable)",
+  "suggestions": [
+    {
+      "id": "unique-suggestion-id",
+      "exampleId": "the exact ID from the [ID: ...] field above",
+      "field": "title or description",
+      "title": "brief label e.g. 'Improve title for example 2'",
+      "original": "the current value being replaced",
+      "improved": "your suggested replacement"
+    }
+  ]
+}
+
+Only include suggestions when you have specific improvements ready. Otherwise leave suggestions as an empty array. Always use the exact ID values from the [ID: ...] labels above.`;
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName });
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)));
+    return res.response;
+  });
+  const text = response.text();
+  logUsage(
+    "portfolio_analysis",
+    modelUsed,
+    response.usageMetadata?.promptTokenCount || 0,
+    response.usageMetadata?.candidatesTokenCount || 0
+  );
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON found in response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      message: parsed.message || "Analysis complete.",
+      suggestions: parsed.suggestions || []
+    };
+  } catch (err) {
+    logger.error("Failed to parse portfolio analysis response:", text);
+    return {
+      message: text || "Could not parse AI response. Please try again.",
+      suggestions: []
     };
   }
 }
@@ -1836,6 +1925,12 @@ function registerPortfolioHandlers() {
   electron.ipcMain.handle("portfolio:create", (_e, data) => createExample(data));
   electron.ipcMain.handle("portfolio:update", (_e, id, data) => updateExample(id, data));
   electron.ipcMain.handle("portfolio:delete", (_e, id) => deleteExample(id));
+  electron.ipcMain.handle("portfolio:analyse", (_e, examples, userReply, previousAnalysis) => {
+    const niches = getDb().prepare(`SELECT n.name, COUNT(l.id) as leadCount
+                FROM niches n LEFT JOIN leads l ON l.niche_id = n.id
+                GROUP BY n.id ORDER BY n.name`).all();
+    return analysePortfolio(examples, niches, userReply, previousAnalysis);
+  });
 }
 function registerAllHandlers() {
   registerSettingsHandlers();

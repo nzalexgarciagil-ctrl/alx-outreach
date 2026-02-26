@@ -98,7 +98,8 @@ export async function generateDraft(
     website?: string
     niche?: string
   },
-  portfolioExamples?: Array<{ title: string; url: string; description: string | null }>
+  portfolioExamples?: Array<{ title: string; url: string; description: string | null }>,
+  extraContext?: string
 ): Promise<{ subject: string; body: string; personalizationNotes: string }> {
   const client = getClient()
 
@@ -113,13 +114,17 @@ When including examples in the email, replace the template's existing example li
 `
       : ''
 
+  const extraContextSection = extraContext
+    ? `\nADDITIONAL CONTEXT FROM USER:\n${extraContext}\n`
+    : ''
+
   const prompt = `You are an email personalization assistant for a videography agency called ALX.
 
 Given this email template and lead information, generate a personalized email.
 
 TEMPLATE SUBJECT: ${templateSubject}
 TEMPLATE BODY: ${templateBody}
-${portfolioSection}
+${portfolioSection}${extraContextSection}
 LEAD INFO:
 - First Name: ${lead.first_name}
 - Last Name: ${lead.last_name || 'N/A'}
@@ -254,6 +259,163 @@ Return your response in this exact JSON format:
       confidence: 0.5,
       reasoning: 'Failed to classify automatically'
     }
+  }
+}
+
+export async function regenerateDraft(
+  templateSubject: string,
+  templateBody: string,
+  lead: {
+    first_name: string
+    last_name?: string
+    company?: string
+    website?: string
+    niche?: string
+  },
+  previousDraft: { subject: string; body: string },
+  feedback: string,
+  portfolioExamples?: Array<{ title: string; url: string; description: string | null }>
+): Promise<{ subject: string; body: string; personalizationNotes: string }> {
+  const client = getClient()
+
+  const portfolioSection =
+    portfolioExamples && portfolioExamples.length > 0
+      ? `\nAVAILABLE PORTFOLIO EXAMPLES (pick the 3-4 most relevant for this lead's industry):\n${portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ''}`).join('\n')}\n`
+      : ''
+
+  const prompt = `You are an email personalization assistant for a videography agency called ALX.
+
+A draft email was generated and the user has requested specific changes. Rewrite the email incorporating their feedback.
+
+ORIGINAL TEMPLATE SUBJECT: ${templateSubject}
+ORIGINAL TEMPLATE BODY: ${templateBody}
+${portfolioSection}
+LEAD INFO:
+- First Name: ${lead.first_name}
+- Last Name: ${lead.last_name || 'N/A'}
+- Company: ${lead.company || 'N/A'}
+- Website: ${lead.website || 'N/A'}
+- Niche: ${lead.niche || 'N/A'}
+
+PREVIOUS DRAFT SUBJECT: ${previousDraft.subject}
+PREVIOUS DRAFT BODY: ${previousDraft.body}
+
+USER FEEDBACK: ${feedback}
+
+INSTRUCTIONS:
+1. Rewrite the email incorporating the user's feedback exactly
+2. Keep all personalisation from the previous draft unless the feedback says otherwise
+3. Do NOT add a signature block
+4. Preserve the full template length unless told to shorten it
+
+HUMANISATION RULES:
+- Write like a real person, not a marketing bot
+- Use contractions naturally (I'm, I've, you've, it's)
+- Vary sentence length
+- BANNED: "landscape", "pivotal", "underscore", "leverage", "utilize", "delve", "comprehensive", "robust", "innovative", "transformative", "seamlessly", "tailored", "streamline", "cutting-edge"
+- No em dashes (—), no sycophantic openers, no excessive hedging
+- Specific and direct
+
+Return your response in this exact JSON format:
+{
+  "subject": "the updated subject line",
+  "body": "the updated email body (plain text, use \\n for line breaks)",
+  "personalization_notes": "brief note about what was changed based on feedback"
+}`
+
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName })
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)))
+    return res.response
+  })
+
+  const text = response.text()
+  logUsage('draft_regeneration', modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0)
+  logger.info(`Draft regenerated using ${modelUsed}`)
+
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) {
+      const truncated = text.substring(0, 300).replace(/\n/g, ' ')
+      throw new Error(`Gemini refused: ${truncated}`)
+    }
+    const parsed = JSON.parse(jsonMatch[0])
+    return {
+      subject: parsed.subject,
+      body: parsed.body,
+      personalizationNotes: parsed.personalization_notes || ''
+    }
+  } catch (err) {
+    logger.error('Failed to parse Gemini regenerate response:', text)
+    throw err instanceof Error && err.message.startsWith('Gemini refused')
+      ? err
+      : new Error(`Failed to parse AI response: ${(err as Error).message}`)
+  }
+}
+
+export async function preflightCheck(
+  templateSubject: string,
+  templateBody: string,
+  niche: string,
+  sampleLeads: Array<{ first_name: string; last_name?: string; company?: string; website?: string }>
+): Promise<{ hasQuestions: boolean; questions: Array<{ id: string; question: string; hint: string }> }> {
+  const client = getClient()
+
+  const leadSample = sampleLeads
+    .slice(0, 4)
+    .map((l, i) => `${i + 1}. ${l.first_name} ${l.last_name || ''} | Company: ${l.company || 'none'} | Website: ${l.website || 'none'}`)
+    .join('\n')
+
+  const prompt = `You are reviewing an email template before AI draft generation for a videography agency called ALX.
+
+TEMPLATE SUBJECT: ${templateSubject}
+TEMPLATE BODY: ${templateBody}
+
+TARGET NICHE: ${niche}
+SAMPLE LEADS:
+${leadSample}
+
+Your job: identify genuine uncertainties that would make it hard to write a good personalised email. Only ask questions if they would materially change how you write the email.
+
+Examples of good questions:
+- Many leads have no website — should I skip mentioning websites or use their company name instead?
+- The template references a specific service but doesn't describe it — what does ALX offer for this niche?
+- Should the tone be formal (B2B) or casual for this niche?
+
+Do NOT ask obvious questions or anything that can be inferred from the template/lead data.
+
+If everything is clear, return hasQuestions: false with an empty array.
+
+Return this exact JSON format:
+{
+  "hasQuestions": true,
+  "questions": [
+    {
+      "id": "q1",
+      "question": "The question to show the user",
+      "hint": "A short placeholder/example answer to guide them"
+    }
+  ]
+}`
+
+  const { result: response } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName })
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)))
+    return res.response
+  })
+
+  const text = response.text()
+
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/)
+    if (!jsonMatch) return { hasQuestions: false, questions: [] }
+    const parsed = JSON.parse(jsonMatch[0])
+    return {
+      hasQuestions: !!parsed.hasQuestions && parsed.questions?.length > 0,
+      questions: parsed.questions || []
+    }
+  } catch {
+    return { hasQuestions: false, questions: [] }
   }
 }
 

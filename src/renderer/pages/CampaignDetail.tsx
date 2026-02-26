@@ -16,8 +16,17 @@ import {
   Edit,
   ArrowLeft,
   CheckCheck,
-  Loader2
+  Loader2,
+  RefreshCw,
+  HelpCircle,
+  X
 } from 'lucide-react'
+
+interface PreflightQuestion {
+  id: string
+  question: string
+  hint: string
+}
 
 export default function CampaignDetail() {
   const { id } = useParams<{ id: string }>()
@@ -25,11 +34,26 @@ export default function CampaignDetail() {
   const [campaign, setCampaign] = useState<Campaign | null>(null)
   const [emails, setEmails] = useState<Email[]>([])
   const [tab, setTab] = useState('overview')
+
+  // Generation state
   const [generating, setGenerating] = useState(false)
   const [genProgress, setGenProgress] = useState({ generated: 0, total: 0 })
   const [genErrors, setGenErrors] = useState<string[]>([])
+
+  // Preflight modal
+  const [preflightChecking, setPreflightChecking] = useState(false)
+  const [preflightQuestions, setPreflightQuestions] = useState<PreflightQuestion[]>([])
+  const [preflightAnswers, setPreflightAnswers] = useState<Record<string, string>>({})
+  const [showPreflight, setShowPreflight] = useState(false)
+
+  // Manual edit
   const [editingEmail, setEditingEmail] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ subject: '', body: '' })
+
+  // AI feedback/regenerate
+  const [feedbackOpenFor, setFeedbackOpenFor] = useState<string | null>(null)
+  const [feedbackText, setFeedbackText] = useState('')
+  const [regeneratingId, setRegeneratingId] = useState<string | null>(null)
 
   useEffect(() => {
     if (id) loadData()
@@ -50,15 +74,40 @@ export default function CampaignDetail() {
     setEmails(e)
   }
 
-  const handleGenerateDrafts = async () => {
+  const handleGenerateClick = async () => {
+    // Run preflight first
+    setPreflightChecking(true)
+    try {
+      const result = await window.electronAPI.campaigns.preflight(id!) as {
+        hasQuestions: boolean
+        questions: PreflightQuestion[]
+      }
+      if (result.hasQuestions && result.questions.length > 0) {
+        setPreflightQuestions(result.questions)
+        setPreflightAnswers(Object.fromEntries(result.questions.map(q => [q.id, ''])))
+        setShowPreflight(true)
+        return
+      }
+    } catch {
+      // Preflight failed — just proceed without it
+    } finally {
+      setPreflightChecking(false)
+    }
+    runGeneration()
+  }
+
+  const runGeneration = async (extraContext?: string) => {
+    setShowPreflight(false)
     setGenerating(true)
     setGenProgress({ generated: 0, total: 0 })
     setGenErrors([])
     try {
-      const result = await window.electronAPI.campaigns.generateDrafts(id!) as { generated: number; total: number; errors: string[] }
-      if (result.errors?.length > 0) {
-        setGenErrors(result.errors)
+      const result = await window.electronAPI.campaigns.generateDrafts(id!, extraContext) as {
+        generated: number
+        total: number
+        errors: string[]
       }
+      if (result.errors?.length > 0) setGenErrors(result.errors)
       loadData()
       setTab('drafts')
     } catch (err) {
@@ -66,6 +115,14 @@ export default function CampaignDetail() {
     } finally {
       setGenerating(false)
     }
+  }
+
+  const handlePreflightProceed = () => {
+    const answersText = preflightQuestions
+      .filter(q => preflightAnswers[q.id]?.trim())
+      .map(q => `Q: ${q.question}\nA: ${preflightAnswers[q.id].trim()}`)
+      .join('\n\n')
+    runGeneration(answersText || undefined)
   }
 
   const handleApprove = async (emailId: string) => {
@@ -103,6 +160,27 @@ export default function CampaignDetail() {
     loadData()
   }
 
+  const openFeedback = (emailId: string) => {
+    setFeedbackOpenFor(emailId)
+    setFeedbackText('')
+  }
+
+  const handleRegenerate = async (emailId: string) => {
+    if (!feedbackText.trim()) return
+    setRegeneratingId(emailId)
+    try {
+      await window.electronAPI.emails.regenerate(emailId, feedbackText.trim())
+      setFeedbackOpenFor(null)
+      setFeedbackText('')
+      loadData()
+    } catch (err) {
+      // error will show in the card
+      console.error('Regenerate failed:', err)
+    } finally {
+      setRegeneratingId(null)
+    }
+  }
+
   if (!campaign) return <div className="text-zinc-400">Loading...</div>
 
   const drafts = emails.filter((e) => e.status === 'draft')
@@ -113,6 +191,47 @@ export default function CampaignDetail() {
 
   return (
     <div className="space-y-4">
+      {/* Preflight modal */}
+      {showPreflight && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm">
+          <GlassCard className="w-full max-w-lg space-y-4 border border-cyan-500/20">
+            <div className="flex items-start gap-3">
+              <HelpCircle className="w-5 h-5 text-cyan-400 shrink-0 mt-0.5" />
+              <div className="flex-1">
+                <h3 className="font-semibold">Quick questions before generating</h3>
+                <p className="text-xs text-zinc-400 mt-0.5">
+                  The AI spotted a few things that would help it write better emails.
+                  Answer what you can — skip anything obvious.
+                </p>
+              </div>
+              <button onClick={() => { setShowPreflight(false); runGeneration() }} className="text-zinc-500 hover:text-zinc-300">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="space-y-4">
+              {preflightQuestions.map((q) => (
+                <div key={q.id} className="space-y-1.5">
+                  <label className="text-sm text-zinc-200">{q.question}</label>
+                  <Input
+                    placeholder={q.hint}
+                    value={preflightAnswers[q.id] || ''}
+                    onChange={(e) => setPreflightAnswers(prev => ({ ...prev, [q.id]: e.target.value }))}
+                  />
+                </div>
+              ))}
+            </div>
+            <div className="flex gap-2 justify-end">
+              <Button variant="outline" size="sm" onClick={() => { setShowPreflight(false); runGeneration() }}>
+                Skip & generate anyway
+              </Button>
+              <Button size="sm" onClick={handlePreflightProceed}>
+                <Wand2 className="w-3 h-3" /> Generate with context
+              </Button>
+            </div>
+          </GlassCard>
+        </div>
+      )}
+
       <div className="flex items-center gap-3">
         <Button variant="ghost" size="icon" onClick={() => navigate('/campaigns')}>
           <ArrowLeft className="w-4 h-4" />
@@ -149,11 +268,17 @@ export default function CampaignDetail() {
       <div className="flex gap-2">
         <Button
           size="sm"
-          onClick={handleGenerateDrafts}
-          disabled={generating || campaign.total_leads === 0}
+          onClick={handleGenerateClick}
+          disabled={generating || preflightChecking || campaign.total_leads === 0}
         >
-          {generating ? <Loader2 className="w-3 h-3 animate-spin" /> : <Wand2 className="w-3 h-3" />}
-          {generating
+          {(generating || preflightChecking) ? (
+            <Loader2 className="w-3 h-3 animate-spin" />
+          ) : (
+            <Wand2 className="w-3 h-3" />
+          )}
+          {preflightChecking
+            ? 'Checking template...'
+            : generating
             ? `Generating (${genProgress.generated}/${genProgress.total})`
             : 'Generate AI Drafts'}
         </Button>
@@ -175,7 +300,9 @@ export default function CampaignDetail() {
 
       {genErrors.length > 0 && (
         <GlassCard className="space-y-2 border border-red-500/20 bg-red-500/5 p-4">
-          <p className="text-xs font-medium text-red-400">{genErrors.length} draft{genErrors.length !== 1 ? 's' : ''} failed to generate:</p>
+          <p className="text-xs font-medium text-red-400">
+            {genErrors.length} draft{genErrors.length !== 1 ? 's' : ''} failed to generate:
+          </p>
           <ul className="space-y-1">
             {genErrors.map((err, i) => (
               <li key={i} className="text-xs text-zinc-400 font-mono leading-relaxed">{err}</li>
@@ -228,9 +355,7 @@ export default function CampaignDetail() {
                       <Input
                         className="mt-1"
                         value={editForm.subject}
-                        onChange={(e) =>
-                          setEditForm({ ...editForm, subject: e.target.value })
-                        }
+                        onChange={(e) => setEditForm({ ...editForm, subject: e.target.value })}
                       />
                     ) : (
                       <p className="text-xs text-zinc-400 mt-0.5">Subject: {email.subject}</p>
@@ -238,11 +363,18 @@ export default function CampaignDetail() {
                   </div>
                   <div className="flex gap-1">
                     {editingEmail === email.id ? (
-                      <Button size="sm" onClick={saveEdit}>
-                        Save
-                      </Button>
+                      <Button size="sm" onClick={saveEdit}>Save</Button>
                     ) : (
                       <>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          title="Regenerate with feedback"
+                          onClick={() => feedbackOpenFor === email.id ? setFeedbackOpenFor(null) : openFeedback(email.id)}
+                          className={feedbackOpenFor === email.id ? 'text-cyan-400' : ''}
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                        </Button>
                         <Button variant="ghost" size="icon" onClick={() => startEdit(email)}>
                           <Edit className="w-3.5 h-3.5" />
                         </Button>
@@ -266,6 +398,7 @@ export default function CampaignDetail() {
                     )}
                   </div>
                 </div>
+
                 {editingEmail === email.id ? (
                   <Textarea
                     className="mt-2"
@@ -277,6 +410,39 @@ export default function CampaignDetail() {
                     {email.body}
                   </p>
                 )}
+
+                {/* AI feedback panel */}
+                {feedbackOpenFor === email.id && (
+                  <div className="mt-3 pt-3 border-t border-white/5 space-y-2">
+                    <p className="text-xs text-zinc-400">Tell the AI what to change:</p>
+                    <div className="flex gap-2">
+                      <Input
+                        placeholder='e.g. "make it shorter", "mention their Instagram", "more casual tone"'
+                        value={feedbackText}
+                        onChange={(e) => setFeedbackText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && feedbackText.trim() && regeneratingId !== email.id) {
+                            handleRegenerate(email.id)
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <Button
+                        size="sm"
+                        onClick={() => handleRegenerate(email.id)}
+                        disabled={!feedbackText.trim() || regeneratingId === email.id}
+                      >
+                        {regeneratingId === email.id ? (
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                        ) : (
+                          <RefreshCw className="w-3 h-3" />
+                        )}
+                        {regeneratingId === email.id ? 'Rewriting...' : 'Rewrite'}
+                      </Button>
+                    </div>
+                  </div>
+                )}
+
                 {email.personalization_notes && (
                   <p className="text-xs text-cyan-400/60 mt-2">
                     AI: {email.personalization_notes}

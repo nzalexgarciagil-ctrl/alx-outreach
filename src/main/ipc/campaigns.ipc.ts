@@ -22,7 +22,7 @@ export function registerCampaignsHandlers(): void {
   )
 
   // Generate AI drafts for a campaign
-  ipcMain.handle('campaigns:generateDrafts', async (event, campaignId: string) => {
+  ipcMain.handle('campaigns:generateDrafts', async (event, campaignId: string, extraContext?: string) => {
     const campaign = campaignsRepo.getCampaignById(campaignId)
     if (!campaign) throw new Error('Campaign not found')
     if (!campaign.template_id) throw new Error('No template assigned to campaign')
@@ -66,7 +66,8 @@ export function registerCampaignsHandlers(): void {
               website: lead.website || undefined,
               niche: lead.niche_name || undefined
             },
-            portfolioExamples.length > 0 ? portfolioExamples : undefined
+            portfolioExamples.length > 0 ? portfolioExamples : undefined,
+            extraContext
           )
           subject = draft.subject
           body = draft.body
@@ -110,5 +111,26 @@ export function registerCampaignsHandlers(): void {
     campaignsRepo.updateCampaign(campaignId, { status: 'drafts_ready' })
 
     return { generated, total: leads.length, errors }
+  })
+
+  ipcMain.handle('campaigns:preflight', async (_e, campaignId: string) => {
+    const campaign = campaignsRepo.getCampaignById(campaignId)
+    if (!campaign?.template_id) return { hasQuestions: false, questions: [] }
+
+    const template = templatesRepo.getTemplateById(campaign.template_id)
+    if (!template) return { hasQuestions: false, questions: [] }
+
+    const leadIds = campaignsRepo.getCampaignLeadIds(campaignId)
+    const sampleLeads = leadIds
+      .slice(0, 4)
+      .map((id) => leadsRepo.getLeadById(id))
+      .filter((l): l is NonNullable<typeof l> => !!l)
+
+    return geminiService.preflightCheck(
+      template.subject,
+      template.body,
+      campaign.niche_name || 'General',
+      sampleLeads
+    )
   })
 }

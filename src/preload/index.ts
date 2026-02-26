@@ -55,7 +55,8 @@ const api = {
     addLeads: (campaignId: string, leadIds: string[]) =>
       ipcRenderer.invoke('campaigns:addLeads', campaignId, leadIds),
     getLeadIds: (campaignId: string) => ipcRenderer.invoke('campaigns:getLeadIds', campaignId),
-    generateDrafts: (campaignId: string) => ipcRenderer.invoke('campaigns:generateDrafts', campaignId)
+    generateDrafts: (campaignId: string, extraContext?: string) => ipcRenderer.invoke('campaigns:generateDrafts', campaignId, extraContext),
+    preflight: (campaignId: string) => ipcRenderer.invoke('campaigns:preflight', campaignId)
   },
 
   // Emails
@@ -67,6 +68,7 @@ const api = {
     delete: (id: string) => ipcRenderer.invoke('emails:delete', id),
     approve: (id: string) => ipcRenderer.invoke('emails:approve', id),
     reject: (id: string) => ipcRenderer.invoke('emails:reject', id),
+    regenerate: (id: string, feedback: string) => ipcRenderer.invoke('emails:regenerate', id, feedback),
     approveBatch: (ids: string[]) => ipcRenderer.invoke('emails:approveBatch', ids),
     queueApproved: (campaignId: string) => ipcRenderer.invoke('emails:queueApproved', campaignId),
     getStats: () => ipcRenderer.invoke('emails:getStats'),
