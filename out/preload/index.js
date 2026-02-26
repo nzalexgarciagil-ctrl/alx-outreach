@@ -50,7 +50,9 @@ const api = {
     delete: (id) => electron.ipcRenderer.invoke("campaigns:delete", id),
     addLeads: (campaignId, leadIds) => electron.ipcRenderer.invoke("campaigns:addLeads", campaignId, leadIds),
     getLeadIds: (campaignId) => electron.ipcRenderer.invoke("campaigns:getLeadIds", campaignId),
-    generateDrafts: (campaignId, extraContext) => electron.ipcRenderer.invoke("campaigns:generateDrafts", campaignId, extraContext),
+    generateDrafts: (campaignId, extraContext, workerCount) => electron.ipcRenderer.invoke("campaigns:generateDrafts", campaignId, extraContext, workerCount),
+    generateVariants: (campaignId, feedback) => electron.ipcRenderer.invoke("campaigns:generateVariants", campaignId, feedback),
+    createDraftsFromVariants: (campaignId, variants) => electron.ipcRenderer.invoke("campaigns:createDraftsFromVariants", campaignId, variants),
     preflight: (campaignId) => electron.ipcRenderer.invoke("campaigns:preflight", campaignId)
   },
   // Emails

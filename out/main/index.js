@@ -847,8 +847,9 @@ function deleteExample(id) {
 const DRAFT_MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"];
 const CLASSIFY_MODELS = ["gemini-3-flash-preview", "gemini-2.5-flash", "gemini-2.0-flash"];
 let genAI = null;
-let lastRequestTime = 0;
-const MIN_REQUEST_INTERVAL = 6700;
+const WINDOW_MS = 6e4;
+const MAX_REQUESTS_PER_WINDOW = 9;
+const requestTimestamps = [];
 function getClient$1() {
   const apiKey = get("gemini_api_key") || process.env.GEMINI_API_KEY || "";
   if (!apiKey) throw new Error("Gemini API key not configured");
@@ -858,13 +859,19 @@ function getClient$1() {
   return genAI;
 }
 async function rateLimitedRequest(fn) {
-  const now = Date.now();
-  const timeSinceLastRequest = now - lastRequestTime;
-  if (timeSinceLastRequest < MIN_REQUEST_INTERVAL) {
-    await new Promise((resolve) => setTimeout(resolve, MIN_REQUEST_INTERVAL - timeSinceLastRequest));
+  while (true) {
+    const now = Date.now();
+    while (requestTimestamps.length > 0 && requestTimestamps[0] <= now - WINDOW_MS) {
+      requestTimestamps.shift();
+    }
+    if (requestTimestamps.length < MAX_REQUESTS_PER_WINDOW) {
+      requestTimestamps.push(now);
+      return fn();
+    }
+    const waitMs = requestTimestamps[0] + WINDOW_MS - now + 50;
+    logger.info(`Rate limiter: window full (${requestTimestamps.length}/${MAX_REQUESTS_PER_WINDOW}), waiting ${Math.round(waitMs / 1e3)}s`);
+    await new Promise((resolve) => setTimeout(resolve, waitMs));
   }
-  lastRequestTime = Date.now();
-  return fn();
 }
 async function withRetry(fn, retries = 3, delayMs = 1e4) {
   let lastErr = null;
@@ -911,7 +918,7 @@ function logUsage(type, model, inputTokens, outputTokens) {
   } catch {
   }
 }
-async function generateDraft(templateSubject, templateBody, lead, portfolioExamples, extraContext) {
+async function generateDraft(templateSubject, templateBody, lead, portfolioExamples, extraContext, brief) {
   const client = getClient$1();
   const portfolioSection = portfolioExamples && portfolioExamples.length > 0 ? `
 AVAILABLE PORTFOLIO EXAMPLES (pick the 3-4 most relevant for this lead's industry):
@@ -925,13 +932,21 @@ When including examples in the email, replace the template's existing example li
 ADDITIONAL CONTEXT FROM USER:
 ${extraContext}
 ` : "";
+  const briefSection = brief ? `
+CAMPAIGN BRIEF (follow these rules for all drafts in this campaign):
+- Niche context: ${brief.nicheContext}
+- Personalisation angles: ${brief.personalizationAngles}
+- Tone: ${brief.toneGuidance}
+- Missing data: ${brief.missingDataHandling}
+- Portfolio focus: ${brief.portfolioFocus}
+` : "";
   const prompt = `You are an email personalization assistant for a videography agency called ALX.
 
 Given this email template and lead information, generate a personalized email.
 
 TEMPLATE SUBJECT: ${templateSubject}
 TEMPLATE BODY: ${templateBody}
-${portfolioSection}${extraContextSection}
+${portfolioSection}${briefSection}${extraContextSection}
 LEAD INFO:
 - First Name: ${lead.first_name}
 - Last Name: ${lead.last_name || "N/A"}
@@ -1172,6 +1187,130 @@ Return this exact JSON format:
     return { hasQuestions: false, questions: [] };
   }
 }
+async function generateTemplateVariants(templateSubject, templateBody, niche, portfolioExamples, feedback) {
+  const client = getClient$1();
+  const portfolioList = portfolioExamples.length > 0 ? portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ""}`).join("\n") : "No portfolio examples available.";
+  const feedbackSection = feedback ? `
+USER FEEDBACK TO INCORPORATE:
+${feedback}
+` : "";
+  const prompt = `You are an email copywriter for ALX, a videography agency doing cold email outreach.
+
+Generate 3 different template variants based on the template below. Each variant takes a different angle or hook, but keeps the same core offer and length.
+
+RULES:
+- Keep ALL {{variable}} placeholders EXACTLY as-is ({{first_name}}, {{company}}, {{last_name}}, {{website}}, {{niche}}) — do not fill them in
+- Each variant should have a different opening angle (e.g. "Direct offer", "Question hook", "Social proof angle")
+- Same length as the original — don't shorten
+- No em dashes (—), no AI buzzwords, write like a real person
+- Keep any portfolio link lines exactly as formatted in the original
+
+TARGET NICHE: ${niche}
+
+AVAILABLE PORTFOLIO:
+${portfolioList}
+${feedbackSection}
+BASE TEMPLATE SUBJECT: ${templateSubject}
+BASE TEMPLATE BODY:
+${templateBody}
+
+Return exactly this JSON format:
+[
+  {
+    "label": "Short name for this variant e.g. 'Direct'",
+    "subject": "subject line with {{variables}} kept intact",
+    "body": "email body with {{variables}} kept intact, \\n for line breaks"
+  },
+  { "label": "...", "subject": "...", "body": "..." },
+  { "label": "...", "subject": "...", "body": "..." }
+]`;
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName });
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)));
+    return res.response;
+  });
+  const text = response.text();
+  logUsage("template_variants", modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
+  logger.info(`Template variants generated using ${modelUsed}`);
+  try {
+    const jsonMatch = text.match(/\[[\s\S]*\]/);
+    if (!jsonMatch) throw new Error("No JSON array in response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    return parsed.map((v) => ({
+      label: v.label || "Variant",
+      subject: v.subject || templateSubject,
+      body: v.body || templateBody
+    }));
+  } catch (err) {
+    logger.error("Failed to parse template variants:", text);
+    throw new Error(`Failed to parse variants: ${err.message}`);
+  }
+}
+async function generateCampaignBrief(templateSubject, templateBody, niche, sampleLeads, portfolioExamples) {
+  const client = getClient$1();
+  const leadSample = sampleLeads.slice(0, 4).map((l, i) => `${i + 1}. ${l.first_name} ${l.last_name || ""} | Company: ${l.company || "none"} | Website: ${l.website || "none"}`).join("\n");
+  const portfolioList = portfolioExamples.length > 0 ? portfolioExamples.map((e, i) => `${i + 1}. ${e.title} — ${e.url}${e.description ? ` (${e.description})` : ""}`).join("\n") : "No portfolio examples available.";
+  const prompt = `You are a campaign strategist for ALX, a videography agency doing cold email outreach.
+
+Before a batch of AI workers write personalised emails, create a strategic brief they will all follow.
+
+TEMPLATE SUBJECT: ${templateSubject}
+TEMPLATE BODY: ${templateBody}
+
+TARGET NICHE: ${niche}
+SAMPLE LEADS:
+${leadSample}
+
+AVAILABLE PORTFOLIO:
+${portfolioList}
+
+Write a concise brief covering:
+1. nicheContext: What this industry cares about, common pain points video content addresses (2-3 sentences)
+2. personalizationAngles: Best 2-3 ways to personalise using company/website/name (2-3 sentences, specific)
+3. toneGuidance: Formal vs casual, B2B vs B2C nuances, language to lean into (1-2 sentences)
+4. missingDataHandling: Exact fallback strategy when company or website is missing — don't say "skip it", say what to write instead (2 sentences)
+5. portfolioFocus: Which portfolio examples to prioritise for this niche, name specific ones (2 sentences)
+
+Be direct and actionable. Workers need rules, not vague advice.
+
+Return this exact JSON:
+{
+  "nicheContext": "...",
+  "personalizationAngles": "...",
+  "toneGuidance": "...",
+  "missingDataHandling": "...",
+  "portfolioFocus": "..."
+}`;
+  const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
+    const model = client.getGenerativeModel({ model: modelName });
+    const res = await withRetry(() => rateLimitedRequest(() => model.generateContent(prompt)));
+    return res.response;
+  });
+  const text = response.text();
+  logUsage("campaign_brief", modelUsed, response.usageMetadata?.promptTokenCount || 0, response.usageMetadata?.candidatesTokenCount || 0);
+  logger.info(`Campaign brief generated using ${modelUsed}`);
+  try {
+    const jsonMatch = text.match(/\{[\s\S]*\}/);
+    if (!jsonMatch) throw new Error("No JSON in brief response");
+    const parsed = JSON.parse(jsonMatch[0]);
+    return {
+      nicheContext: parsed.nicheContext || "",
+      personalizationAngles: parsed.personalizationAngles || "",
+      toneGuidance: parsed.toneGuidance || "",
+      missingDataHandling: parsed.missingDataHandling || "",
+      portfolioFocus: parsed.portfolioFocus || ""
+    };
+  } catch (err) {
+    logger.error("Failed to parse campaign brief, using fallback:", err.message);
+    return {
+      nicheContext: `Target niche: ${niche}`,
+      personalizationAngles: "Use the lead's company name and first name for personalisation.",
+      toneGuidance: "Professional but warm tone.",
+      missingDataHandling: "If no website is available, reference the company name only. If no company, address the lead by first name only.",
+      portfolioFocus: "Use the most relevant portfolio examples for this industry."
+    };
+  }
+}
 async function analysePortfolio(examples, niches, userReply, previousAnalysis) {
   const client = getClient$1();
   const examplesList = examples.map((e, i) => `${i + 1}. [ID: ${e.id}] Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : " | No description"}`).join("\n");
@@ -1262,77 +1401,160 @@ function registerCampaignsHandlers() {
     "campaigns:getLeadIds",
     (_e, campaignId) => getCampaignLeadIds(campaignId)
   );
-  electron.ipcMain.handle("campaigns:generateDrafts", async (event, campaignId, extraContext) => {
+  electron.ipcMain.handle("campaigns:generateDrafts", async (event, campaignId, extraContext, workerCount = 5) => {
     const campaign = getCampaignById(campaignId);
     if (!campaign) throw new Error("Campaign not found");
     if (!campaign.template_id) throw new Error("No template assigned to campaign");
     const template = getTemplateById(campaign.template_id);
     if (!template) throw new Error("Template not found");
     const leadIds = getCampaignLeadIds(campaignId);
-    const leads = leadIds.map((id) => getLeadById(id)).filter((l) => !!l);
+    const allLeads = leadIds.map((id) => getLeadById(id)).filter((l) => !!l);
     const portfolioExamples = getAllExamples();
-    let generated = 0;
-    const errors = [];
-    for (const lead of leads) {
+    event.sender.send("campaigns:draft-progress", {
+      campaignId,
+      generated: 0,
+      total: allLeads.length,
+      workers: 0,
+      phase: "briefing"
+    });
+    let brief;
+    if (isConfigured()) {
       try {
-        const existing = getEmailsByCampaign(campaignId).find((e) => e.lead_id === lead.id);
-        if (existing) {
-          generated++;
-          continue;
-        }
-        let subject;
-        let body;
-        let personalizationNotes = "";
-        if (isConfigured()) {
-          const draft = await generateDraft(
-            template.subject,
-            template.body,
-            {
-              first_name: lead.first_name,
-              last_name: lead.last_name || void 0,
-              company: lead.company || void 0,
-              website: lead.website || void 0,
-              niche: lead.niche_name || void 0
-            },
-            portfolioExamples.length > 0 ? portfolioExamples : void 0,
-            extraContext
-          );
-          subject = draft.subject;
-          body = draft.body;
-          personalizationNotes = draft.personalizationNotes;
-        } else {
-          const vars = {
-            first_name: lead.first_name,
-            last_name: lead.last_name || "",
-            company: lead.company || "",
-            website: lead.website || "",
-            niche: lead.niche_name || ""
-          };
-          subject = renderTemplate(template.subject, vars);
-          body = renderTemplate(template.body, vars);
-        }
-        createEmail({
-          campaign_id: campaignId,
-          lead_id: lead.id,
-          template_id: template.id,
-          subject,
-          body,
-          personalization_notes: personalizationNotes
-        });
-        generated++;
-        event.sender.send("campaigns:draft-progress", {
-          campaignId,
-          generated,
-          total: leads.length
-        });
+        brief = await generateCampaignBrief(
+          template.subject,
+          template.body,
+          campaign.niche_name || "General",
+          allLeads.slice(0, 4),
+          portfolioExamples
+        );
+        logger.info("Campaign brief generated successfully");
       } catch (err) {
-        const error = err.message;
-        logger.error(`Failed to generate draft for ${lead.email}:`, error);
-        errors.push(`${lead.email}: ${error}`);
+        logger.warn("Brief generation failed, proceeding without:", err.message);
       }
     }
+    const existingEmails = getEmailsByCampaign(campaignId);
+    const existingLeadIds = new Set(existingEmails.map((e) => e.lead_id));
+    const leadsToProcess = allLeads.filter((l) => !existingLeadIds.has(l.id));
+    const queue = [...leadsToProcess];
+    let generated = existingLeadIds.size;
+    const errors = [];
+    const actualWorkers = Math.min(workerCount, Math.max(queue.length, 1), 20);
+    event.sender.send("campaigns:draft-progress", {
+      campaignId,
+      generated,
+      total: allLeads.length,
+      workers: actualWorkers,
+      phase: "generating"
+    });
+    const runWorker = async (workerId) => {
+      logger.info(`Worker ${workerId}/${actualWorkers} started`);
+      while (true) {
+        const lead = queue.shift();
+        if (!lead) break;
+        try {
+          let subject;
+          let body;
+          let personalizationNotes = "";
+          if (isConfigured()) {
+            const draft = await generateDraft(
+              template.subject,
+              template.body,
+              {
+                first_name: lead.first_name,
+                last_name: lead.last_name || void 0,
+                company: lead.company || void 0,
+                website: lead.website || void 0,
+                niche: lead.niche_name || void 0
+              },
+              portfolioExamples.length > 0 ? portfolioExamples : void 0,
+              extraContext,
+              brief
+            );
+            subject = draft.subject;
+            body = draft.body;
+            personalizationNotes = draft.personalizationNotes;
+          } else {
+            const vars = {
+              first_name: lead.first_name,
+              last_name: lead.last_name || "",
+              company: lead.company || "",
+              website: lead.website || "",
+              niche: lead.niche_name || ""
+            };
+            subject = renderTemplate(template.subject, vars);
+            body = renderTemplate(template.body, vars);
+          }
+          createEmail({
+            campaign_id: campaignId,
+            lead_id: lead.id,
+            template_id: template.id,
+            subject,
+            body,
+            personalization_notes: personalizationNotes
+          });
+          generated++;
+          event.sender.send("campaigns:draft-progress", {
+            campaignId,
+            generated,
+            total: allLeads.length,
+            workers: actualWorkers,
+            phase: "generating"
+          });
+        } catch (err) {
+          const error = err.message;
+          logger.error(`Worker ${workerId}: failed draft for ${lead.email}:`, error);
+          errors.push(`${lead.email}: ${error}`);
+        }
+      }
+      logger.info(`Worker ${workerId} finished`);
+    };
+    await Promise.all(Array.from({ length: actualWorkers }, (_, i) => runWorker(i + 1)));
     updateCampaign(campaignId, { status: "drafts_ready" });
-    return { generated, total: leads.length, errors };
+    return { generated, total: allLeads.length, errors };
+  });
+  electron.ipcMain.handle("campaigns:generateVariants", async (_e, campaignId, feedback) => {
+    const campaign = getCampaignById(campaignId);
+    if (!campaign?.template_id) throw new Error("No template assigned to campaign");
+    const template = getTemplateById(campaign.template_id);
+    if (!template) throw new Error("Template not found");
+    const portfolioExamples = getAllExamples();
+    return generateTemplateVariants(
+      template.subject,
+      template.body,
+      campaign.niche_name || "General",
+      portfolioExamples,
+      feedback
+    );
+  });
+  electron.ipcMain.handle("campaigns:createDraftsFromVariants", (_e, campaignId, variants) => {
+    const campaign = getCampaignById(campaignId);
+    if (!campaign?.template_id) throw new Error("Campaign not found");
+    const leadIds = getCampaignLeadIds(campaignId);
+    const leads = leadIds.map((id) => getLeadById(id)).filter((l) => !!l);
+    const existing = getEmailsByCampaign(campaignId, "draft");
+    existing.forEach((e) => deleteEmail(e.id));
+    let created = 0;
+    leads.forEach((lead, index) => {
+      const variant = variants[index % variants.length];
+      const vars = {
+        first_name: lead.first_name,
+        last_name: lead.last_name || "",
+        company: lead.company || "",
+        website: lead.website || "",
+        niche: lead.niche_name || ""
+      };
+      createEmail({
+        campaign_id: campaignId,
+        lead_id: lead.id,
+        template_id: campaign.template_id,
+        subject: renderTemplate(variant.subject, vars),
+        body: renderTemplate(variant.body, vars),
+        personalization_notes: `Quick mode — ${variant.label}`
+      });
+      created++;
+    });
+    updateCampaign(campaignId, { status: "drafts_ready" });
+    return { created, total: leads.length };
   });
   electron.ipcMain.handle("campaigns:preflight", async (_e, campaignId) => {
     const campaign = getCampaignById(campaignId);

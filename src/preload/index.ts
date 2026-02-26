@@ -125,6 +125,11 @@ const api = {
       ipcRenderer.invoke('portfolio:analyse', examples, userReply, previousAnalysis)
   },
 
+  // Updater
+  updater: {
+    install: () => ipcRenderer.send('updater:install')
+  },
+
   // Event listeners
   on: (channel: string, callback: (...args: unknown[]) => void) => {
     const validChannels = [
@@ -133,7 +138,8 @@ const api = {
       'queue:rate-limited', 'queue:error',
       'inbox:new-replies',
       'campaigns:draft-progress',
-      'validation:progress'
+      'validation:progress',
+      'updater:update-available', 'updater:download-progress', 'updater:update-downloaded'
     ]
     if (validChannels.includes(channel)) {
       const listener = (_event: Electron.IpcRendererEvent, ...args: unknown[]) => callback(...args)

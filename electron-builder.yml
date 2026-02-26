@@ -1,4 +1,8 @@
 appId: com.alx.outreach
+publish:
+  provider: github
+  owner: nzalexgarciagil-ctrl
+  repo: alx-outreach
 productName: ALX Outreach
 directories:
   buildResources: resources

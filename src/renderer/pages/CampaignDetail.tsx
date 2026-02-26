@@ -426,7 +426,7 @@ export default function CampaignDetail() {
           </p>
           <div className="flex gap-2">
             <Input
-              placeholder='e.g. "make all emails shorter", "more casual tone", "don\'t mention pricing"'
+              placeholder={`e.g. "make all emails shorter", "more casual tone", "don't mention pricing"`}
               value={overallFeedback}
               onChange={(e) => setOverallFeedback(e.target.value)}
               onKeyDown={(e) => { if (e.key === 'Enter' && overallFeedback.trim()) handleOverallFeedback() }}
