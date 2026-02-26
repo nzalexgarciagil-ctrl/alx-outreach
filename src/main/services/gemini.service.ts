@@ -173,7 +173,12 @@ Return your response in this exact JSON format:
 
   try {
     const jsonMatch = text.match(/\{[\s\S]*\}/)
-    if (!jsonMatch) throw new Error('No JSON found in response')
+    if (!jsonMatch) {
+      // Gemini returned plain text — likely a safety refusal. Surface it directly.
+      const truncated = text.substring(0, 300).replace(/\n/g, ' ')
+      logger.error('Gemini refused or returned non-JSON:', truncated)
+      throw new Error(`Gemini refused: ${truncated}`)
+    }
     const parsed = JSON.parse(jsonMatch[0])
     return {
       subject: parsed.subject,
@@ -182,7 +187,9 @@ Return your response in this exact JSON format:
     }
   } catch (err) {
     logger.error('Failed to parse Gemini draft response:', text)
-    throw new Error(`Failed to parse AI response: ${(err as Error).message}`)
+    throw err instanceof Error && err.message.startsWith('Gemini refused')
+      ? err
+      : new Error(`Failed to parse AI response: ${(err as Error).message}`)
   }
 }
 

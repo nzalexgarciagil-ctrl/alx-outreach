@@ -27,6 +27,7 @@ export default function CampaignDetail() {
   const [tab, setTab] = useState('overview')
   const [generating, setGenerating] = useState(false)
   const [genProgress, setGenProgress] = useState({ generated: 0, total: 0 })
+  const [genErrors, setGenErrors] = useState<string[]>([])
   const [editingEmail, setEditingEmail] = useState<string | null>(null)
   const [editForm, setEditForm] = useState({ subject: '', body: '' })
 
@@ -52,12 +53,16 @@ export default function CampaignDetail() {
   const handleGenerateDrafts = async () => {
     setGenerating(true)
     setGenProgress({ generated: 0, total: 0 })
+    setGenErrors([])
     try {
-      await window.electronAPI.campaigns.generateDrafts(id!)
+      const result = await window.electronAPI.campaigns.generateDrafts(id!) as { generated: number; total: number; errors: string[] }
+      if (result.errors?.length > 0) {
+        setGenErrors(result.errors)
+      }
       loadData()
       setTab('drafts')
     } catch (err) {
-      console.error('Draft generation failed:', err)
+      setGenErrors([`Generation failed: ${(err as Error).message}`])
     } finally {
       setGenerating(false)
     }
@@ -166,6 +171,17 @@ export default function CampaignDetail() {
 
       {generating && genProgress.total > 0 && (
         <Progress value={genProgress.generated} max={genProgress.total} />
+      )}
+
+      {genErrors.length > 0 && (
+        <GlassCard className="space-y-2 border border-red-500/20 bg-red-500/5 p-4">
+          <p className="text-xs font-medium text-red-400">{genErrors.length} draft{genErrors.length !== 1 ? 's' : ''} failed to generate:</p>
+          <ul className="space-y-1">
+            {genErrors.map((err, i) => (
+              <li key={i} className="text-xs text-zinc-400 font-mono leading-relaxed">{err}</li>
+            ))}
+          </ul>
+        </GlassCard>
       )}
 
       {/* Tabs */}
