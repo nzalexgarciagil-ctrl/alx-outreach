@@ -246,8 +246,8 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
                     <>In the sidebar go to <span className="text-white font-medium">APIs &amp; Services → Library</span>, search <span className="text-white font-medium">"Gmail API"</span> and click <span className="text-white font-medium">Enable</span></>,
                     <>Go to <span className="text-white font-medium">APIs &amp; Services → OAuth consent screen</span> → choose <span className="text-white font-medium">External</span> → fill in App Name (anything) → add your Gmail as a <span className="text-white font-medium">Test User</span></>,
                     <>Go to <span className="text-white font-medium">Credentials → Create Credentials → OAuth Client ID</span></>,
-                    <>Application type: <span className="text-white font-medium">Desktop app</span> → Create</>,
-                    <>Copy the <span className="text-white font-medium">Client ID</span> and <span className="text-white font-medium">Client Secret</span> below</>,
+                    <>Application type: <span className="text-cyan-400 font-bold">Desktop app</span> — <span className="text-red-400">NOT "Web application"</span>, this must be Desktop app or login will fail</>,
+                    <>Click <span className="text-white font-medium">Create</span>, then copy the <span className="text-white font-medium">Client ID</span> and <span className="text-white font-medium">Client Secret</span> below</>,
                   ].map((item, i) => (
                     <li key={i} className="flex gap-2.5 items-start">
                       <span className="w-5 h-5 rounded-full bg-cyan-500/20 text-cyan-400 text-xs flex items-center justify-center shrink-0 mt-0.5">{i+1}</span>
@@ -274,8 +274,9 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
               <div className="rounded-xl bg-white/5 p-4 space-y-3 text-sm text-zinc-300">
                 <p className="font-medium text-white">Almost there!</p>
                 <p>Click the button below. A browser window will open asking you to sign in to Google and grant ALX Outreach permission to send emails on your behalf.</p>
-                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-yellow-300 text-xs">
-                  ⚠️ Google may show a warning that the app is "unverified" — that's normal for personal OAuth apps. Click <strong>Advanced → Go to [app name]</strong> to continue.
+                <div className="bg-yellow-500/10 border border-yellow-500/20 rounded-lg p-3 text-yellow-300 text-xs space-y-1.5">
+                  <p>⚠️ Google may show a warning that the app is "unverified" — that's normal. Click <strong>Advanced → Go to [app name]</strong> to continue.</p>
+                  <p>🔴 Getting a <strong>redirect_uri_mismatch</strong> error? It means you picked <strong>"Web application"</strong> instead of <strong>"Desktop app"</strong> when creating credentials. Go back to Google Cloud → Credentials → delete the current one → create a new OAuth Client ID and make sure to select <strong>Desktop app</strong>.</p>
                 </div>
               </div>
               {gmailConnected ? (
