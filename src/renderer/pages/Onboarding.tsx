@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react'
 import {
-  CheckCircle, ExternalLink, Key, Mail, ArrowRight,
+  CheckCircle, ExternalLink, Key, Mail, ArrowRight, ArrowLeft,
   Loader2, ChevronRight, Sparkles, Copy, Check
 } from 'lucide-react'
 import { Button } from '@/components/ui/button'
@@ -158,6 +158,16 @@ export default function Onboarding({ onComplete }: OnboardingProps) {
             </React.Fragment>
           ))}
         </div>
+
+        {/* Back button */}
+        {step > 0 && step < 4 && (
+          <button
+            onClick={() => setStep(step - 1)}
+            className="flex items-center gap-1.5 text-sm text-zinc-500 hover:text-zinc-300 transition-colors mb-4"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" /> Back
+          </button>
+        )}
 
         {/* Step content */}
         <div className="bg-white/5 border border-white/10 rounded-2xl p-6 backdrop-blur-sm">
