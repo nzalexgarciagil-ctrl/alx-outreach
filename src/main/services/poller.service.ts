@@ -75,17 +75,42 @@ async function pollOnce(): Promise<void> {
       const from = fromHeader?.value || ''
       const subject = subjectHeader?.value || ''
 
-      // Extract body
-      let body = ''
-      if (message.payload?.body?.data) {
-        body = Buffer.from(message.payload.body.data, 'base64url').toString('utf-8')
-      } else if (message.payload?.parts) {
-        for (const part of message.payload.parts) {
-          if (part.mimeType === 'text/plain' && part.body?.data) {
-            body = Buffer.from(part.body.data, 'base64url').toString('utf-8')
-            break
+      // Extract body — Gmail can nest multipart/alternative inside multipart/mixed,
+      // so we need to recurse through all parts to find text/plain
+      const extractText = (payload: typeof message.payload): string => {
+        if (!payload) return ''
+        // Direct body (simple non-multipart message)
+        if (payload.body?.data) {
+          return Buffer.from(payload.body.data, 'base64url').toString('utf-8')
+        }
+        if (payload.parts) {
+          // Prefer text/plain first
+          for (const part of payload.parts) {
+            if (part.mimeType === 'text/plain' && part.body?.data) {
+              return Buffer.from(part.body.data, 'base64url').toString('utf-8')
+            }
+          }
+          // Recurse into nested multipart (multipart/alternative, multipart/mixed, etc.)
+          for (const part of payload.parts) {
+            if (part.mimeType?.startsWith('multipart/')) {
+              const nested = extractText(part as typeof message.payload)
+              if (nested) return nested
+            }
+          }
+          // Last resort: any part with body data
+          for (const part of payload.parts) {
+            if (part.body?.data) {
+              return Buffer.from(part.body.data, 'base64url').toString('utf-8')
+            }
           }
         }
+        return ''
+      }
+
+      let body = extractText(message.payload)
+      // Final fallback: use Gmail snippet (always populated, never empty)
+      if (!body.trim() && message.snippet) {
+        body = message.snippet
       }
 
       // Create reply record
