@@ -258,14 +258,14 @@ Return your response in this exact JSON format:
 }
 
 export async function analysePortfolio(
-  examples: Array<{ title: string; url: string; description: string | null }>,
+  examples: Array<{ id: string; title: string; url: string; description: string | null }>,
   userReply?: string,
   previousAnalysis?: string
-): Promise<{ message: string; suggestions: Array<{ id: string; title: string; original: string; improved: string }> }> {
+): Promise<{ message: string; suggestions: Array<{ id: string; exampleId: string; field: string; title: string; original: string; improved: string }> }> {
   const client = getClient()
 
   const examplesList = examples
-    .map((e, i) => `${i + 1}. Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : ' | No description'}`)
+    .map((e, i) => `${i + 1}. [ID: ${e.id}] Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : ' | No description'}`)
     .join('\n')
 
   const conversationContext = previousAnalysis
@@ -285,18 +285,20 @@ ${previousAnalysis ? 'Continue the conversation based on the user reply above. G
 
 Return your response in this exact JSON format:
 {
-  "message": "your conversational message to the user (ask questions, give feedback, be direct and helpful)",
+  "message": "your conversational message (use **bold**, bullet points with -, numbered lists where helpful — make it readable)",
   "suggestions": [
     {
-      "id": "unique-id",
-      "title": "brief label for this suggestion",
-      "original": "the current title or description",
-      "improved": "your suggested improvement"
+      "id": "unique-suggestion-id",
+      "exampleId": "the exact ID from the [ID: ...] field above",
+      "field": "title or description",
+      "title": "brief label e.g. 'Improve title for example 2'",
+      "original": "the current value being replaced",
+      "improved": "your suggested replacement"
     }
   ]
 }
 
-Only include suggestions array items if you have specific improvements ready to suggest. Otherwise leave it as an empty array.`
+Only include suggestions when you have specific improvements ready. Otherwise leave suggestions as an empty array. Always use the exact ID values from the [ID: ...] labels above.`
 
   const { result: response, modelUsed } = await tryModels(DRAFT_MODELS, async (modelName) => {
     const model = client.getGenerativeModel({ model: modelName })

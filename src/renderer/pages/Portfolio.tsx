@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import ReactMarkdown from 'react-markdown'
 import { GlassCard } from '@/components/layout/GlassCard'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -14,6 +15,8 @@ interface PortfolioExample {
 
 interface Suggestion {
   id: string
+  exampleId: string
+  field: string
   title: string
   original: string
   improved: string
@@ -120,18 +123,13 @@ export default function Portfolio() {
   }
 
   const applySuggestion = async (suggestion: Suggestion) => {
-    // Find an example whose title or description matches the original
-    const match = examples.find(
-      e => e.title === suggestion.original || e.description === suggestion.original
-    )
-    if (match) {
-      const isTitle = match.title === suggestion.original
-      await window.electronAPI.portfolio.update(match.id, isTitle
+    await window.electronAPI.portfolio.update(
+      suggestion.exampleId,
+      suggestion.field === 'title'
         ? { title: suggestion.improved }
         : { description: suggestion.improved }
-      )
-      await load()
-    }
+    )
+    await load()
     setAppliedIds(prev => new Set([...prev, suggestion.id]))
   }
 
@@ -190,7 +188,23 @@ export default function Portfolio() {
                         : 'bg-cyan-500/20 text-cyan-100'
                     }`}
                   >
-                    {msg.text}
+                    {msg.role === 'ai' ? (
+                      <ReactMarkdown
+                        components={{
+                          p: ({ children }) => <p className="mb-2 last:mb-0">{children}</p>,
+                          strong: ({ children }) => <strong className="text-white font-semibold">{children}</strong>,
+                          ul: ({ children }) => <ul className="list-disc list-inside space-y-1 mb-2">{children}</ul>,
+                          ol: ({ children }) => <ol className="list-decimal list-inside space-y-1 mb-2">{children}</ol>,
+                          li: ({ children }) => <li className="text-zinc-300">{children}</li>,
+                          h3: ({ children }) => <h3 className="font-semibold text-white mt-2 mb-1">{children}</h3>,
+                          code: ({ children }) => <code className="bg-white/10 rounded px-1 text-cyan-300 text-xs">{children}</code>,
+                        }}
+                      >
+                        {msg.text}
+                      </ReactMarkdown>
+                    ) : (
+                      msg.text
+                    )}
                   </div>
                   {msg.suggestions && msg.suggestions.length > 0 && (
                     <div className="w-full space-y-2">
