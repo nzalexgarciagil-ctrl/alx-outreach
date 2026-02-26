@@ -134,6 +134,19 @@ INSTRUCTIONS:
 4. Do NOT add a signature block — the template already includes it
 5. Preserve the full template length — do not shorten or summarise
 
+HUMANISATION RULES — the email must read like a real person wrote it, not AI:
+- Write like you're a real person sending a quick email, not a marketing bot
+- Use contractions naturally (I'm, I've, you've, it's, don't)
+- Vary sentence length — mix short punchy sentences with longer ones
+- BANNED words/phrases: "landscape", "pivotal", "underscore", "leverage", "utilize", "delve", "comprehensive", "robust", "innovative", "transformative", "seamlessly", "tailored", "streamline", "cutting-edge", "it's worth noting", "I hope this finds you well", "I hope this helps", "feel free to", "don't hesitate to", "as per", "please find"
+- No em dashes (—) — use commas or just end the sentence
+- No rule-of-three lists unless the template has them
+- No sycophantic openers or closers
+- No excessive hedging ("might potentially possibly")
+- Specific and direct — say exactly what you mean
+- If something is good, just say it's good — don't oversell it
+- The email should feel like it was typed by a real person in 10 minutes, not crafted by an AI for an hour
+
 Return your response in this exact JSON format:
 {
   "subject": "the personalized subject line",
