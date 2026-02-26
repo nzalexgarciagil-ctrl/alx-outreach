@@ -259,6 +259,7 @@ Return your response in this exact JSON format:
 
 export async function analysePortfolio(
   examples: Array<{ id: string; title: string; url: string; description: string | null }>,
+  niches: Array<{ name: string; leadCount: number }>,
   userReply?: string,
   previousAnalysis?: string
 ): Promise<{ message: string; suggestions: Array<{ id: string; exampleId: string; field: string; title: string; original: string; improved: string }> }> {
@@ -268,20 +269,31 @@ export async function analysePortfolio(
     .map((e, i) => `${i + 1}. [ID: ${e.id}] Title: "${e.title}" | URL: ${e.url}${e.description ? ` | Description: ${e.description}` : ' | No description'}`)
     .join('\n')
 
+  const nichesList = niches.length > 0
+    ? niches.map(n => `- ${n.name} (${n.leadCount} leads)`).join('\n')
+    : 'No niches configured yet.'
+
   const conversationContext = previousAnalysis
     ? `\nPREVIOUS ANALYSIS CONTEXT:\n${previousAnalysis}\n\nUSER REPLY: ${userReply || '(no reply)'}\n`
     : ''
 
   const prompt = `You are a portfolio optimisation assistant for ALX, a videography agency doing cold email outreach.
 
-Your job is to review the agency's portfolio examples and help make them more effective for AI-driven email personalisation. When the AI generates outreach emails, it picks 3-4 examples from this list that are most relevant to each lead's industry.
+When generating outreach emails, the AI picks 3-4 portfolio examples from the list that are most relevant to each lead's industry/niche. Your job is to make sure the portfolio is well-matched to the niches being targeted and that each example's title and description is as useful as possible for that matching.
+
+TARGET NICHES (who ALX is sending outreach to):
+${nichesList}
 
 CURRENT PORTFOLIO EXAMPLES:
 ${examplesList}
 ${conversationContext}
-Your goal: Help make each example's title and description as useful as possible so the AI can pick the right ones. Good titles are specific like "Speed ramp — Car dealership" or "Talking head — Real estate agent". Good descriptions explain the style, pace, and context in 1 sentence.
+Key things to assess:
+- Are there examples covering each target niche? Flag any niches with no matching examples.
+- Are titles specific enough? (e.g. "Speed ramp — Car dealership" beats "Speed ramp")
+- Do descriptions explain style, pace, and context in a way that helps match to industries?
+- Are there gaps — niches being targeted but no relevant example exists?
 
-${previousAnalysis ? 'Continue the conversation based on the user reply above. Give specific actionable suggestions based on their response.' : 'Review all examples and give your initial analysis. Ask one focused question to better understand their work so you can suggest improvements. Be direct and specific — no fluff.'}
+${previousAnalysis ? 'Continue the conversation based on the user reply above. Give specific actionable suggestions based on their response.' : 'Give your initial analysis. Highlight any niche gaps first, then suggest title/description improvements. Be direct — no fluff. Ask one focused question at the end if you need more info.'}
 
 Return your response in this exact JSON format:
 {
